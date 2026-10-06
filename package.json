@@ -1,0 +1,75 @@
+{
+  "name": "koibill",
+  "version": "0.9.0",
+  "description": "A focused PDF annotation and Markdown research workspace with an integrated browser.",
+  "main": "./out/main/index.js",
+  "author": {
+    "name": "koibill contributors",
+    "email": "maintainers@koibill.app"
+  },
+  "homepage": "https://koibill.app",
+  "desktopName": "koibill",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "preview": "electron-vite preview",
+    "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "dist:linux": "pnpm build && electron-builder --linux AppImage deb"
+  },
+  "dependencies": {
+    "@vitejs/plugin-react": "latest",
+    "@xyflow/react": "^12.12.0",
+    "lucide-react": "latest",
+    "pdf-lib": "1.17.1",
+    "pdfjs-dist": "6.3.289",
+    "react": "19.3.0",
+    "react-dom": "19.3.0",
+    "react-markdown": "10.1.0",
+    "remark-gfm": "4.0.1",
+    "zustand": "5.0.15"
+  },
+  "devDependencies": {
+    "@testing-library/jest-dom": "latest",
+    "@testing-library/react": "latest",
+    "@types/node": "latest",
+    "@types/react": "latest",
+    "@types/react-dom": "latest",
+    "electron": "44.4.5",
+    "electron-builder": "26.15.3",
+    "electron-vite": "5.0.0",
+    "jsdom": "latest",
+    "typescript": "latest",
+    "vite": "latest",
+    "vitest": "latest"
+  },
+  "build": {
+    "appId": "com.koibill.app",
+    "productName": "koibill",
+    "directories": {
+      "buildResources": "build"
+    },
+    "asar": true,
+    "files": [
+      "out/**/*",
+      "package.json"
+    ],
+    "linux": {
+      "target": [
+        "AppImage",
+        "deb"
+      ],
+      "category": "Office",
+      "syncDesktopName": true,
+      "icon": "build/icon.png",
+      "artifactName": "${productName}-${version}-${arch}.${ext}"
+    },
+    "deb": {
+      "priority": "optional"
+    }
+  },
+  "packageManager": "pnpm@11.19.0"
+}

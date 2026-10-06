@@ -1,0 +1,62 @@
+import { beforeEach, describe, expect, it } from 'vitest'
+import type { PdfSession } from '../../shared/types'
+import { useWorkspaceStore } from './store'
+
+const session = (documentId: string): PdfSession => ({
+  id: `session-${documentId}`, documentId, name: `${documentId}.pdf`, fingerprint: documentId,
+  bytes: new Uint8Array(), fingerprintMismatch: false,
+  annotations: { schemaVersion: 2, sourceFingerprint: documentId, sourceFilename: `${documentId}.pdf`, modifiedAt: '', pages: [], annotations: [] },
+})
+
+describe('multi-document workspace store', () => {
+  beforeEach(() => useWorkspaceStore.getState().restore({ schemaVersion: 1, documents: [], activeDocumentId: null, tray: [], question: '' }))
+
+  it('keeps independent annotation and history state per PDF', () => {
+    const state = useWorkspaceStore.getState()
+    state.upsertSession(session('a')); state.upsertSession(session('b'))
+    useWorkspaceStore.getState().addAnnotation('a', { id: 'mark', type: 'highlight', pageIndex: 0, rects: [], color: '#fff', opacity: .4, createdAt: '' })
+    expect(useWorkspaceStore.getState().documents.a.document?.annotations).toHaveLength(1)
+    expect(useWorkspaceStore.getState().documents.b.document?.annotations).toHaveLength(0)
+    useWorkspaceStore.getState().undo('a')
+    expect(useWorkspaceStore.getState().documents.a.document?.annotations).toHaveLength(0)
+  })
+
+  it('preserves tray excerpts when their PDF tab closes', () => {
+    const state = useWorkspaceStore.getState(); state.upsertSession(session('a'))
+    state.addTrayItem({ id: 'item', documentId: 'a', sourceFingerprint: 'a', documentName: 'a.pdf', pageNumber: 1, text: 'Excerpt', createdAt: '' })
+    useWorkspaceStore.getState().close('a')
+    expect(useWorkspaceStore.getState().tray[0].text).toBe('Excerpt')
+  })
+
+  it('clamps PDF zoom safely and keeps it independent per document', () => {
+    const state = useWorkspaceStore.getState(); state.upsertSession(session('a')); state.upsertSession(session('b'))
+    useWorkspaceStore.getState().setZoom('a', 9)
+    useWorkspaceStore.getState().setZoom('b', 0.01)
+    expect(useWorkspaceStore.getState().documents.a.zoom).toBe(4)
+    expect(useWorkspaceStore.getState().documents.b.zoom).toBe(.25)
+    useWorkspaceStore.getState().setZoom('a', 1.257)
+    expect(useWorkspaceStore.getState().documents.a.zoom).toBe(1.26)
+  })
+
+  it('restores each document reading position', () => {
+    useWorkspaceStore.getState().restore({
+      schemaVersion: 1,
+      documents: [{ documentId: 'a', name: 'a.pdf', missing: false, viewState: { zoom: 1.5, rotation: 270, currentPage: 8 } }],
+      activeDocumentId: 'a', tray: [], question: '',
+    })
+    const restored = useWorkspaceStore.getState().documents.a
+    expect({ zoom: restored.zoom, rotation: restored.rotation, currentPage: restored.currentPage }).toEqual({ zoom: 1.5, rotation: 270, currentPage: 8 })
+  })
+
+  it('restores and bounds per-document focus preferences', () => {
+    useWorkspaceStore.getState().restore({
+      schemaVersion: 1,
+      documents: [{ documentId: 'a', name: 'a.pdf', missing: false, viewState: { zoom: 1, rotation: 0, currentPage: 2, focus: { enabled: true, unit: 'sentence', surroundingVisibility: .2 } } }],
+      activeDocumentId: 'a', tray: [], question: '',
+    })
+    expect(useWorkspaceStore.getState().documents.a.focus).toEqual({ enabled: true, unit: 'sentence', surroundingVisibility: .2, magnification: 1.25 })
+    useWorkspaceStore.getState().setFocus('a', { surroundingVisibility: .9, magnification: 3 })
+    expect(useWorkspaceStore.getState().documents.a.focus.surroundingVisibility).toBe(.4)
+    expect(useWorkspaceStore.getState().documents.a.focus.magnification).toBe(1.6)
+  })
+})
