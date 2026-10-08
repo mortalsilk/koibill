@@ -64,6 +64,8 @@ describe('workspace reading state validation', () => {
     expect(isWorkspaceUiState({ ...base, viewStates: { a: { zoom: 1.5, rotation: 90, currentPage: 3 } } })).toBe(true)
     expect(isWorkspaceUiState({ ...base, viewStates: { a: { zoom: 1.5, rotation: 90, currentPage: 3, focus: { enabled: true, unit: 'sentence', surroundingVisibility: .15 } } } })).toBe(true)
     expect(isWorkspaceUiState({ ...base, viewStates: { a: { zoom: 1.5, rotation: 90, currentPage: 3, focus: { enabled: true, unit: 'sentence', surroundingVisibility: .15, magnification: 1.4 } } } })).toBe(true)
+    expect(isWorkspaceUiState({ ...base, viewStates: { a: { zoom: 1.5, rotation: 90, currentPage: 3, reflow: { mode: 'split', splitRatio: .55 } } } })).toBe(true)
+    expect(isWorkspaceUiState({ ...base, viewStates: { a: { zoom: 1.5, rotation: 90, currentPage: 3, reflow: { mode: 'unknown', splitRatio: .55 } } } })).toBe(false)
     expect(isWorkspaceUiState({ ...base, viewStates: { a: { zoom: 1.5, rotation: 90, currentPage: 3, focus: { enabled: true, unit: 'column', surroundingVisibility: .15 } } } })).toBe(false)
     expect(isWorkspaceUiState({ ...base, viewStates: { a: { zoom: 1.5, rotation: 90, currentPage: 3, focus: { enabled: true, unit: 'line', surroundingVisibility: .8 } } } })).toBe(false)
     expect(isWorkspaceUiState({ ...base, viewStates: { a: { zoom: 1.5, rotation: 90, currentPage: 3, focus: { enabled: true, unit: 'line', surroundingVisibility: .15, magnification: 2 } } } })).toBe(false)

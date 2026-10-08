@@ -1,4 +1,4 @@
-import type { Annotation, AnnotationDocument, AskAIRequest, BrowserBounds, BrowserCommand, GraphDocument, ResearchTrayItem, WorkspaceUiState } from './types'
+import type { Annotation, AnnotationDocument, AskAIRequest, BrowserBounds, BrowserCommand, GraphDocument, ResearchTrayItem, SemanticDocument, SemanticSourceSpan, WorkspaceUiState } from './types'
 import { detectAIProvider, isAIConversationUrl, isAIProviderId } from './ai-providers'
 
 export function isSafeWebUrl(value: string): boolean {
@@ -56,6 +56,8 @@ export function isAskAIRequest(value: unknown): value is AskAIRequest {
       && typeof request.documentName === 'string'
       && Number.isInteger(request.pageNumber)
       && Number(request.pageNumber) > 0
+      && optionalPageRange(request.endPageNumber, Number(request.pageNumber))
+      && optionalSourceSpans(request.sourceSpans)
   }
   return request.kind === 'research'
     && typeof request.question === 'string'
@@ -131,6 +133,8 @@ export function isResearchTrayItem(value: unknown): value is ResearchTrayItem {
   return typeof item.id === 'string' && typeof item.documentId === 'string'
     && typeof item.sourceFingerprint === 'string' && typeof item.documentName === 'string'
     && Number.isInteger(item.pageNumber) && Number(item.pageNumber) > 0
+    && optionalPageRange(item.endPageNumber, Number(item.pageNumber))
+    && optionalSourceSpans(item.sourceSpans)
     && typeof item.text === 'string' && item.text.length > 0 && item.text.length <= 20_000
     && (item.annotationId === undefined || typeof item.annotationId === 'string')
     && typeof item.createdAt === 'string'
@@ -199,6 +203,8 @@ function isGraphSource(value: unknown): boolean {
   return typeof source.id === 'string' && ['pdf', 'chatgpt', 'ai', 'web'].includes(String(source.kind))
     && typeof source.excerpt === 'string' && source.excerpt.length > 0 && source.excerpt.length <= 20_000
     && Number.isInteger(source.pageNumber) && Number(source.pageNumber) > 0
+    && optionalPageRange(source.endPageNumber, Number(source.pageNumber))
+    && optionalSourceSpans(source.sourceSpans)
     && (source.url === undefined || (typeof source.url === 'string' && isSafeWebUrl(source.url) && source.url !== 'about:blank'))
     && (source.title === undefined || (typeof source.title === 'string' && source.title.length <= 500))
     && (source.browserTabId === undefined || typeof source.browserTabId === 'string')
@@ -212,7 +218,67 @@ function isPdfViewState(value: unknown): boolean {
   return Number.isFinite(state.zoom) && Number(state.zoom) >= .25 && Number(state.zoom) <= 4
     && Number.isInteger(state.rotation) && [0, 90, 180, 270].includes(Number(state.rotation))
     && Number.isInteger(state.currentPage) && Number(state.currentPage) > 0
-    && isPdfFocusSettings(state.focus)
+    && isPdfFocusSettings(state.focus) && isPdfReflowSettings(state.reflow)
+}
+
+function isPdfReflowSettings(value: unknown): boolean {
+  if (value === undefined) return true
+  if (!value || typeof value !== 'object') return false
+  const reflow = value as Record<string, unknown>
+  return ['original', 'reflow', 'split'].includes(String(reflow.mode))
+    && Number(reflow.splitRatio) >= .25 && Number(reflow.splitRatio) <= .75
+}
+
+export function isSemanticDocument(value: unknown): value is SemanticDocument {
+  if (!value || typeof value !== 'object') return false
+  const document = value as Record<string, unknown>
+  return document.schemaVersion === 1 && typeof document.extractorVersion === 'string'
+    && typeof document.sourceFingerprint === 'string' && typeof document.sourceFilename === 'string'
+    && Number.isInteger(document.pageCount) && Number(document.pageCount) > 0
+    && Array.isArray(document.completedPages) && document.completedPages.every((page) => Number.isInteger(page) && Number(page) > 0)
+    && Array.isArray(document.blocks) && document.blocks.length <= 500_000 && document.blocks.every(isSemanticBlock)
+    && typeof document.modifiedAt === 'string'
+}
+
+function isSemanticBlock(value: unknown): boolean {
+  if (!value || typeof value !== 'object') return false
+  const block = value as Record<string, unknown>
+  return typeof block.id === 'string' && ['title', 'heading', 'paragraph', 'list-item', 'figure', 'caption', 'table', 'equation'].includes(String(block.type))
+    && typeof block.text === 'string' && block.text.length <= 100_000
+    && Number(block.confidence) >= 0 && Number(block.confidence) <= 1
+    && Array.isArray(block.sourceSpans) && block.sourceSpans.length > 0 && block.sourceSpans.every(isSourceSpan)
+    && (block.level === undefined || (Number.isInteger(block.level) && Number(block.level) >= 1 && Number(block.level) <= 6))
+    && (block.asset === undefined || isSemanticAsset(block.asset))
+}
+
+function isSemanticAsset(value: unknown): boolean {
+  if (!value || typeof value !== 'object') return false
+  const asset = value as Record<string, unknown>
+  return Number.isInteger(asset.pageNumber) && Number(asset.pageNumber) > 0
+    && ['figure', 'table', 'equation'].includes(String(asset.kind))
+    && Boolean(asset.rect && typeof asset.rect === 'object' && isNormalizedRect(asset.rect as Record<string, unknown>))
+}
+
+function optionalPageRange(value: unknown, start: number): boolean {
+  return value === undefined || (Number.isInteger(value) && Number(value) >= start)
+}
+
+function optionalSourceSpans(value: unknown): value is SemanticSourceSpan[] | undefined {
+  return value === undefined || (Array.isArray(value) && value.length <= 10_000 && value.every(isSourceSpan))
+}
+
+function isSourceSpan(value: unknown): boolean {
+  if (!value || typeof value !== 'object') return false
+  const span = value as Record<string, unknown>
+  return Number.isInteger(span.pageNumber) && Number(span.pageNumber) > 0
+    && Number.isInteger(span.start) && Number.isInteger(span.end) && Number(span.start) >= 0 && Number(span.end) >= Number(span.start)
+    && Array.isArray(span.rects) && span.rects.length <= 1_000 && span.rects.every((rect) => Boolean(rect && typeof rect === 'object' && isNormalizedRect(rect as Record<string, unknown>)))
+}
+
+function isNormalizedRect(item: Record<string, unknown>): boolean {
+  return ['x', 'y', 'width', 'height'].every((key) => Number.isFinite(item[key]))
+    && Number(item.x) >= 0 && Number(item.y) >= 0 && Number(item.width) >= 0 && Number(item.height) >= 0
+    && Number(item.x) + Number(item.width) <= 1.001 && Number(item.y) + Number(item.height) <= 1.001
 }
 
 function isPdfFocusSettings(value: unknown): boolean {

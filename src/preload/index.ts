@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron'
-import type { AnnotationFlushEntry, AskAIFailure, AskAIRequest, AskAIStatus, BrowserBounds, BrowserCommand, BrowserState, GraphAppendPayload, KoibillApi, PdfImportProgress, ResearchTrayItem } from '../shared/types'
+import type { AnnotationFlushEntry, AskAIFailure, AskAIRequest, AskAIStatus, BrowserBounds, BrowserCommand, BrowserState, GraphAppendPayload, KoibillApi, PdfImportProgress, ResearchTrayItem, SemanticDocument } from '../shared/types'
 
 const api: KoibillApi = {
   openPdf: () => ipcRenderer.invoke('pdf:open'),
@@ -40,6 +40,8 @@ const api: KoibillApi = {
   saveDocumentNote: (sessionId, content) => ipcRenderer.invoke('notes:document:save', sessionId, content),
   getGraph: (sessionId) => ipcRenderer.invoke('graph:get', sessionId),
   saveGraph: (sessionId, graph) => ipcRenderer.invoke('graph:save', sessionId, graph),
+  getReflowCache: (sessionId) => ipcRenderer.invoke('reflow:get', sessionId),
+  saveReflowCache: (sessionId, document: SemanticDocument) => ipcRenderer.invoke('reflow:save', sessionId, document),
   exportAnnotatedPdf: (sessionId, document) => ipcRenderer.invoke('pdf:export', sessionId, document),
   showSelectionMenu: (request) => ipcRenderer.send('pdf:selection-menu', request),
   askAI: (request) => ipcRenderer.invoke('ask-ai:run', request),
@@ -89,6 +91,11 @@ const api: KoibillApi = {
     const listener = (): void => callback()
     ipcRenderer.on('ui:toggle-right-pane', listener)
     return () => ipcRenderer.removeListener('ui:toggle-right-pane', listener)
+  },
+  onReflowSourceRequested: (callback: (documentId: string, pageNumber: number) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, documentId: string, pageNumber: number): void => callback(documentId, pageNumber)
+    ipcRenderer.on('reflow:show-source', listener)
+    return () => ipcRenderer.removeListener('reflow:show-source', listener)
   },
   saveUiState: (state) => ipcRenderer.invoke('ui:save', state),
   getUiState: () => ipcRenderer.invoke('ui:get'),

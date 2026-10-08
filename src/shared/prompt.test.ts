@@ -21,4 +21,11 @@ describe('formatPrompt', () => {
       ],
     })).toContain('[2] “b.pdf”, page 9\n> Beta')
   })
+
+  it('preserves a cross-page semantic selection citation', () => {
+    expect(formatPrompt({
+      kind: 'selection', provider: 'claude', requestId: 'range', linkTargets: [], mode: 'draft',
+      text: 'A passage across a page break', documentName: 'paper.pdf', pageNumber: 4, endPageNumber: 5,
+    })).toContain('“paper.pdf”, pages 4–5')
+  })
 })

@@ -15,7 +15,7 @@ afterEach(async () => {
 function harness(root: string, progress: ConstructorParameters<typeof WorkspaceLibrary>[1] = () => undefined): { library: WorkspaceLibrary; settings: () => AppSettings } {
   let value: AppSettings = {
     splitRatio: .55, browserTabs: [], activeBrowserTabId: null, recentPdfs: [], sidecarOverrides: {}, workspaceOverrides: {},
-    workspaceDocuments: [], activeWorkspaceDocumentId: null, researchTray: [], researchQuestion: '', rightPaneMode: 'browser', rightPaneCollapsed: false, markdownNotes: '',
+    workspaceDocuments: [], activeWorkspaceDocumentId: null, researchTray: [], researchQuestion: '', rightPaneMode: 'browser', rightPaneCollapsed: false, reflowTypography: { fontScale: 1, lineHeight: 1.65, measure: 68 }, markdownNotes: '',
     acknowledgedAIProviders: [], workspaceRoot: root, registeredWorkspaces: [], activeWorkspaceId: null,
   }
   const settings = {

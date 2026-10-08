@@ -2,8 +2,8 @@ import { createHash, randomUUID } from 'node:crypto'
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import { app, dialog } from 'electron'
-import type { AIProviderId, AnnotationDocument, GraphDocument, PdfDocumentNote, PdfPageNote, PdfSession, PdfTabDescriptor, PdfViewState, RecentPdf, ResearchWorkspace, RightPaneMode, WorkspaceUiState } from '../shared/types'
-import { isGraphDocument, migrateAnnotationDocument } from '../shared/validation'
+import type { AIProviderId, AnnotationDocument, GraphDocument, PdfDocumentNote, PdfPageNote, PdfSession, PdfTabDescriptor, PdfViewState, RecentPdf, ReflowTypographySettings, ResearchWorkspace, RightPaneMode, SemanticDocument, WorkspaceUiState } from '../shared/types'
+import { isGraphDocument, isSemanticDocument, migrateAnnotationDocument } from '../shared/validation'
 import type { WorkspaceLibrary } from './workspace-library'
 
 interface StoredRecentPdf {
@@ -34,6 +34,7 @@ export interface AppSettings {
   researchQuestion: string
   rightPaneMode: RightPaneMode
   rightPaneCollapsed: boolean
+  reflowTypography: ReflowTypographySettings
   markdownNotes: string
   acknowledgedAIProviders: AIProviderId[]
   workspaceRoot: string
@@ -54,6 +55,7 @@ const defaultSettings: AppSettings = {
   researchQuestion: '',
   rightPaneMode: 'browser',
   rightPaneCollapsed: false,
+  reflowTypography: { fontScale: 1, lineHeight: 1.65, measure: 68 },
   // Retained only so pre-page-note releases can migrate a user's single note.
   markdownNotes: '',
   acknowledgedAIProviders: [],
@@ -77,6 +79,7 @@ export class SettingsStore {
         registeredWorkspaces: Array.isArray(parsed.registeredWorkspaces) ? parsed.registeredWorkspaces.filter(isRegisteredWorkspace) : [],
         activeWorkspaceId: typeof parsed.activeWorkspaceId === 'string' ? parsed.activeWorkspaceId : null,
         rightPaneCollapsed: parsed.rightPaneCollapsed === true,
+        reflowTypography: validTypography(parsed.reflowTypography) ? parsed.reflowTypography : structuredClone(defaultSettings.reflowTypography),
         acknowledgedAIProviders: Array.isArray(parsed.acknowledgedAIProviders) ? parsed.acknowledgedAIProviders : [],
       }
     } catch (error) {
@@ -106,7 +109,7 @@ function isRegisteredWorkspace(value: unknown): value is AppSettings['registered
   return typeof item.id === 'string' && typeof item.name === 'string' && typeof item.path === 'string' && typeof item.lastOpenedAt === 'string'
 }
 
-function globalSettings(settings: AppSettings): Pick<AppSettings, 'windowBounds' | 'workspaceRoot' | 'registeredWorkspaces' | 'activeWorkspaceId' | 'acknowledgedAIProviders' | 'rightPaneCollapsed'> {
+function globalSettings(settings: AppSettings): Pick<AppSettings, 'windowBounds' | 'workspaceRoot' | 'registeredWorkspaces' | 'activeWorkspaceId' | 'acknowledgedAIProviders' | 'rightPaneCollapsed' | 'reflowTypography'> {
   return {
     windowBounds: settings.windowBounds,
     workspaceRoot: settings.workspaceRoot,
@@ -114,7 +117,16 @@ function globalSettings(settings: AppSettings): Pick<AppSettings, 'windowBounds'
     activeWorkspaceId: settings.activeWorkspaceId,
     acknowledgedAIProviders: settings.acknowledgedAIProviders,
     rightPaneCollapsed: settings.rightPaneCollapsed,
+    reflowTypography: settings.reflowTypography,
   }
+}
+
+function validTypography(value: unknown): value is ReflowTypographySettings {
+  if (!value || typeof value !== 'object') return false
+  const item = value as Record<string, unknown>
+  return Number(item.fontScale) >= .8 && Number(item.fontScale) <= 1.6
+    && Number(item.lineHeight) >= 1.2 && Number(item.lineHeight) <= 2.2
+    && Number(item.measure) >= 44 && Number(item.measure) <= 90
 }
 
 interface OpenDocument {
@@ -392,6 +404,24 @@ export class PdfSessionManager {
     })
   }
 
+  async getReflowCache(sessionId: string): Promise<SemanticDocument | null> {
+    const session = this.requireSession(sessionId)
+    try {
+      const value = JSON.parse(await fs.readFile(path.join(session.workspacePath, 'reflow.json'), 'utf8')) as unknown
+      return isSemanticDocument(value) && value.sourceFingerprint === session.fingerprint ? value : null
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null
+      console.warn('Unable to read semantic reflow cache', error)
+      return null
+    }
+  }
+
+  async saveReflowCache(sessionId: string, document: SemanticDocument): Promise<void> {
+    const session = this.requireSession(sessionId)
+    if (!isSemanticDocument(document) || document.sourceFingerprint !== session.fingerprint) throw new Error('Invalid semantic reflow cache.')
+    await this.queueWorkspaceWrite(session, () => atomicWrite(path.join(session.workspacePath, 'reflow.json'), JSON.stringify(document)))
+  }
+
   getSession(id: string): OpenDocument {
     return this.requireSession(id)
   }
@@ -667,7 +697,15 @@ function isStoredViewState(value: unknown): value is PdfViewState {
   return Number.isFinite(state.zoom) && Number(state.zoom) >= .25 && Number(state.zoom) <= 4
     && Number.isInteger(state.rotation) && [0, 90, 180, 270].includes(Number(state.rotation))
     && Number.isInteger(state.currentPage) && Number(state.currentPage) > 0
-    && isStoredFocusSettings(state.focus)
+    && isStoredFocusSettings(state.focus) && isStoredReflowSettings(state.reflow)
+}
+
+function isStoredReflowSettings(value: unknown): boolean {
+  if (value === undefined) return true
+  if (!value || typeof value !== 'object') return false
+  const item = value as Record<string, unknown>
+  return ['original', 'reflow', 'split'].includes(String(item.mode))
+    && Number(item.splitRatio) >= .25 && Number(item.splitRatio) <= .75
 }
 
 function isStoredFocusSettings(value: unknown): boolean {

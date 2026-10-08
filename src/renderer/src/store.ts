@@ -2,6 +2,7 @@ import { create } from 'zustand'
 import type {
   Annotation, AnnotationConversationLink, AnnotationDocument, PageMetadata, PdfSession,
   PdfFocusSettings, PdfTabDescriptor, ResearchTrayItem, ResearchWorkspace, ToolMode,
+  ReflowViewSettings,
 } from '../../shared/types'
 
 export interface PdfDocumentState {
@@ -14,6 +15,7 @@ export interface PdfDocumentState {
   rotation: number
   currentPage: number
   focus: PdfFocusSettings
+  reflow: ReflowViewSettings
   status: 'idle' | 'loading' | 'ready' | 'missing' | 'error'
   error?: string
   fingerprintMismatch: boolean
@@ -54,6 +56,7 @@ interface WorkspaceState {
   setRotation: (documentId: string, rotation: number) => void
   setCurrentPage: (documentId: string, page: number) => void
   setFocus: (documentId: string, focus: Partial<PdfFocusSettings>) => void
+  setReflow: (documentId: string, reflow: Partial<ReflowViewSettings>) => void
   selectAnnotation: (annotationId: string | null) => void
   addTrayItem: (item: ResearchTrayItem) => void
   removeTrayItem: (id: string) => void
@@ -155,6 +158,14 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
       magnification: Math.min(1.6, Math.max(1.1, focus.magnification ?? tab.focus.magnification ?? 1.25)),
     },
   }))),
+  setReflow: (documentId, reflow) => set((state) => updateTab(state, documentId, (tab) => ({
+    ...tab,
+    reflow: {
+      ...tab.reflow,
+      ...reflow,
+      splitRatio: Math.min(.75, Math.max(.25, reflow.splitRatio ?? tab.reflow.splitRatio)),
+    },
+  }))),
   selectAnnotation: (selectedAnnotationId) => set({ selectedAnnotationId }),
   addTrayItem: (item) => set((state) => ({ tray: state.tray.some((existing) => existing.id === item.id) ? state.tray : [...state.tray, item] })),
   removeTrayItem: (id) => set((state) => ({ tray: state.tray.filter((item) => item.id !== id) })),
@@ -175,6 +186,7 @@ function emptyTab(descriptor: PdfTabDescriptor): PdfDocumentState {
     focus: descriptor.viewState?.focus
       ? { ...descriptor.viewState.focus, magnification: descriptor.viewState.focus.magnification ?? 1.25 }
       : { enabled: false, unit: 'paragraph', surroundingVisibility: .15, magnification: 1.25 },
+    reflow: descriptor.viewState?.reflow ?? { mode: 'original', splitRatio: .5 },
     status: descriptor.missing ? 'missing' : 'idle', fingerprintMismatch: false,
   }
 }

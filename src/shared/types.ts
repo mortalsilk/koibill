@@ -5,6 +5,37 @@ export type AIProviderId = 'chatgpt' | 'claude' | 'gemini' | 'perplexity' | 'dee
 export interface NormalizedPoint { x: number; y: number }
 export interface NormalizedRect extends NormalizedPoint { width: number; height: number }
 
+export type SemanticBlockType = 'title' | 'heading' | 'paragraph' | 'list-item' | 'figure' | 'caption' | 'table' | 'equation'
+export interface SemanticSourceSpan {
+  pageNumber: number
+  rects: NormalizedRect[]
+  start: number
+  end: number
+}
+export interface SemanticAssetRegion { pageNumber: number; rect: NormalizedRect; kind: 'figure' | 'table' | 'equation' }
+export interface SemanticBlock {
+  id: string
+  type: SemanticBlockType
+  text: string
+  level?: number
+  confidence: number
+  sourceSpans: SemanticSourceSpan[]
+  asset?: SemanticAssetRegion
+}
+export interface SemanticDocument {
+  schemaVersion: 1
+  extractorVersion: string
+  sourceFingerprint: string
+  sourceFilename: string
+  pageCount: number
+  completedPages: number[]
+  blocks: SemanticBlock[]
+  modifiedAt: string
+}
+export type ReflowViewMode = 'original' | 'reflow' | 'split'
+export interface ReflowViewSettings { mode: ReflowViewMode; splitRatio: number }
+export interface ReflowTypographySettings { fontScale: number; lineHeight: number; measure: number }
+
 export interface AnnotationConversationLink {
   id: string
   provider: AIProviderId
@@ -86,6 +117,8 @@ export interface GraphSource {
   provider?: AIProviderId
   excerpt: string
   pageNumber: number
+  endPageNumber?: number
+  sourceSpans?: SemanticSourceSpan[]
   url?: string
   title?: string
   browserTabId?: string
@@ -139,6 +172,7 @@ export interface PdfViewState {
   rotation: number
   currentPage: number
   focus?: PdfFocusSettings
+  reflow?: ReflowViewSettings
 }
 
 export interface PdfTabDescriptor {
@@ -157,6 +191,8 @@ export interface ResearchTrayItem {
   sourceFingerprint: string
   documentName: string
   pageNumber: number
+  endPageNumber?: number
+  sourceSpans?: SemanticSourceSpan[]
   text: string
   annotationId?: string
   createdAt: string
@@ -281,6 +317,8 @@ export interface SelectionAskAIRequest extends AskAIBase {
   text: string
   documentName: string
   pageNumber: number
+  endPageNumber?: number
+  sourceSpans?: SemanticSourceSpan[]
 }
 
 export interface ResearchAskAIRequest extends AskAIBase {
@@ -305,6 +343,7 @@ export type SelectionMenuRequest = Omit<SelectionAskAIRequest, 'requestId' | 'pr
   documentId: string
   sourceFingerprint: string
   annotationId?: string
+  reflow?: boolean
 }
 
 export type BrowserCommand =
@@ -333,6 +372,7 @@ export interface UiState {
 
 export interface AppUiState extends UiState {
   rightPaneCollapsed: boolean
+  reflowTypography: ReflowTypographySettings
 }
 
 export interface KoibillApi {
@@ -366,6 +406,8 @@ export interface KoibillApi {
   saveDocumentNote(sessionId: string, content: string): Promise<PdfDocumentNote>
   getGraph(sessionId: string): Promise<GraphDocument>
   saveGraph(sessionId: string, graph: GraphDocument): Promise<void>
+  getReflowCache(sessionId: string): Promise<SemanticDocument | null>
+  saveReflowCache(sessionId: string, document: SemanticDocument): Promise<void>
   exportAnnotatedPdf(sessionId: string, document: AnnotationDocument): Promise<{ exported: boolean; pathLabel?: string }>
   showSelectionMenu(request: SelectionMenuRequest): void
   askAI(request: AskAIRequest): Promise<void>
@@ -384,6 +426,7 @@ export interface KoibillApi {
   onDownloadBlocked(callback: (url: string) => void): () => void
   onBrowserShowRequested(callback: () => void): () => void
   onRightPaneToggleRequested(callback: () => void): () => void
+  onReflowSourceRequested(callback: (documentId: string, pageNumber: number) => void): () => void
   saveUiState(state: Partial<AppUiState>): Promise<void>
   getUiState(): Promise<AppUiState>
 }

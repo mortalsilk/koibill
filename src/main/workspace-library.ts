@@ -384,7 +384,15 @@ function isViewState(value: unknown): boolean {
   return Number(state.zoom) >= .25 && Number(state.zoom) <= 4
     && [0, 90, 180, 270].includes(Number(state.rotation))
     && Number.isInteger(state.currentPage) && Number(state.currentPage) > 0
-    && isFocusSettings(state.focus)
+    && isFocusSettings(state.focus) && isReflowSettings(state.reflow)
+}
+
+function isReflowSettings(value: unknown): boolean {
+  if (value === undefined) return true
+  if (!value || typeof value !== 'object') return false
+  const reflow = value as Record<string, unknown>
+  return ['original', 'reflow', 'split'].includes(String(reflow.mode))
+    && Number(reflow.splitRatio) >= .25 && Number(reflow.splitRatio) <= .75
 }
 
 function isFocusSettings(value: unknown): boolean {

@@ -1,6 +1,6 @@
 {
   "name": "koibill",
-  "version": "0.9.0",
+  "version": "0.10.0",
   "description": "A focused PDF annotation and Markdown research workspace with an integrated browser.",
   "main": "./out/main/index.js",
   "author": {

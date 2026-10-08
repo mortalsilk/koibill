@@ -32,7 +32,7 @@ describe('per-document page note layout', () => {
     await writeFile(pdfPath, '%PDF placeholder')
     let settings: AppSettings = {
       splitRatio: .55, browserTabs: [], activeBrowserTabId: null, recentPdfs: [], sidecarOverrides: {}, workspaceOverrides: {},
-      workspaceDocuments: [], activeWorkspaceDocumentId: null, researchTray: [], researchQuestion: '', rightPaneMode: 'browser', rightPaneCollapsed: false, markdownNotes: '', acknowledgedAIProviders: [], workspaceRoot: '', registeredWorkspaces: [], activeWorkspaceId: null,
+      workspaceDocuments: [], activeWorkspaceDocumentId: null, researchTray: [], researchQuestion: '', rightPaneMode: 'browser', rightPaneCollapsed: false, reflowTypography: { fontScale: 1, lineHeight: 1.65, measure: 68 }, markdownNotes: '', acknowledgedAIProviders: [], workspaceRoot: '', registeredWorkspaces: [], activeWorkspaceId: null,
     }
     const fakeSettings = {
       get snapshot(): AppSettings { return structuredClone(settings) },
@@ -87,7 +87,7 @@ describe('per-document page note layout', () => {
     }))
     let settings: AppSettings = {
       splitRatio: .55, browserTabs: [], activeBrowserTabId: null, recentPdfs: [], sidecarOverrides: {}, workspaceOverrides: {},
-      workspaceDocuments: [], activeWorkspaceDocumentId: null, researchTray: [], researchQuestion: '', rightPaneMode: 'browser', rightPaneCollapsed: false, markdownNotes: '', acknowledgedAIProviders: [], workspaceRoot: '', registeredWorkspaces: [], activeWorkspaceId: null,
+      workspaceDocuments: [], activeWorkspaceDocumentId: null, researchTray: [], researchQuestion: '', rightPaneMode: 'browser', rightPaneCollapsed: false, reflowTypography: { fontScale: 1, lineHeight: 1.65, measure: 68 }, markdownNotes: '', acknowledgedAIProviders: [], workspaceRoot: '', registeredWorkspaces: [], activeWorkspaceId: null,
     }
     const fakeSettings = {
       get snapshot(): AppSettings { return structuredClone(settings) },

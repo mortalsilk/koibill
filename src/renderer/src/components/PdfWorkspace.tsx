@@ -1,14 +1,15 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { ChevronDown, ChevronUp, Eraser, FileDown, FolderOpen, Highlighter, Maximize2, Menu, MousePointer2, Pencil, Plus, Redo2, RotateCw, ScanText, Search, Trash2, Undo2, X, ZoomIn, ZoomOut } from 'lucide-react'
+import { BookOpenText, ChevronDown, ChevronUp, Eraser, FileDown, FolderOpen, Highlighter, Maximize2, Menu, MousePointer2, Pencil, Plus, Redo2, RotateCw, ScanText, Search, Trash2, Undo2, X, ZoomIn, ZoomOut } from 'lucide-react'
 import { getDocument, GlobalWorkerOptions, type PDFDocumentProxy, type PDFPageProxy } from 'pdfjs-dist'
 import workerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url'
-import type { AIProviderId, Annotation, AskAIRequest, PdfFocusUnit, PdfImportProgress, PdfSession, PdfViewState, ResearchTrayItem } from '../../../shared/types'
+import type { AIProviderId, Annotation, AskAIRequest, PdfFocusUnit, PdfImportProgress, PdfSession, PdfViewState, ReflowTypographySettings, ReflowViewMode, ResearchTrayItem, SemanticDocument } from '../../../shared/types'
 import { AI_PROVIDERS } from '../../../shared/ai-providers'
 import { formatPrompt } from '../../../shared/prompt'
 import { useWorkspaceStore } from '../store'
 import { getPdfSelectionPageRange, shouldRenderPdfPage, type PdfSelectionPageRange } from '../pdf-selection'
 import { PdfPage } from './PdfPage'
 import { AIProviderSelect } from './AIProviderSelect'
+import { SemanticReflow } from './SemanticReflow'
 import { registerWorkspaceFlusher } from '../persistence'
 import { findReadingUnitAt, nearestReadingUnit, type PageReadingMap, type ReadingUnit } from '../pdf-reading-map'
 import { anchorScrollCorrection, normalizeWheelDelta, zoomForWheel, type WheelZoomAnchor } from '../pdf-wheel-zoom'
@@ -20,7 +21,7 @@ const penColors = ['#000000', '#ef4444', '#2563eb', '#16a34a', '#fde047']
 const zoomSteps = [.25, .5, .75, 1, 1.25, 1.5, 2, 3, 4]
 type SidebarView = 'pages' | 'annotations' | 'research'
 
-export function PdfWorkspace(): React.JSX.Element {
+export function PdfWorkspace({ typography, onTypography }: { typography: ReflowTypographySettings; onTypography: (settings: ReflowTypographySettings) => void }): React.JSX.Element {
   const store = useWorkspaceStore()
   const paneRef = useRef<HTMLElement>(null)
   const viewerRef = useRef<HTMLDivElement>(null)
@@ -51,18 +52,34 @@ export function PdfWorkspace(): React.JSX.Element {
   const [selectionPageRange, setSelectionPageRange] = useState<PdfSelectionPageRange | null>(null)
   const [importProgress, setImportProgress] = useState<PdfImportProgress | null>(null)
   const [activeReadingUnits, setActiveReadingUnits] = useState<Record<string, ReadingUnit | null>>({})
+  const semanticDocumentRef = useRef<SemanticDocument | null>(null)
+  const [reflowDragging, setReflowDragging] = useState(false)
   const activeId = store.activeDocumentId
   const active = activeId ? store.documents[activeId] : undefined
   const annotations = active?.document?.annotations ?? []
   const selectedAnnotation = annotations.find((annotation) => annotation.id === store.selectedAnnotationId)
   const viewStateSignature = store.order.map((id) => {
     const document = store.documents[id]
-    return `${id}:${document?.zoom ?? 1}:${document?.rotation ?? 0}:${document?.currentPage ?? 1}:${document?.focus.enabled ? 1 : 0}:${document?.focus.unit ?? 'paragraph'}:${document?.focus.surroundingVisibility ?? .15}:${document?.focus.magnification ?? 1.25}`
+    return `${id}:${document?.zoom ?? 1}:${document?.rotation ?? 0}:${document?.currentPage ?? 1}:${document?.focus.enabled ? 1 : 0}:${document?.focus.unit ?? 'paragraph'}:${document?.focus.surroundingVisibility ?? .15}:${document?.focus.magnification ?? 1.25}:${document?.reflow.mode ?? 'original'}:${document?.reflow.splitRatio ?? .5}`
   }).join('|')
 
   useEffect(() => setPageInput(String(active?.currentPage ?? 1)), [active?.currentPage, activeId])
   useEffect(() => { pdfPageCount.current = pdf?.numPages ?? 0 }, [pdf])
   useEffect(() => { activeReadingUnitsRef.current = activeReadingUnits }, [activeReadingUnits])
+
+  useEffect(() => {
+    if (!reflowDragging || !activeId) return
+    const move = (event: PointerEvent): void => {
+      const layout = paneRef.current?.querySelector<HTMLElement>('.pdf-content-layout')
+      if (!layout) return
+      const rect = layout.getBoundingClientRect()
+      store.setReflow(activeId, { splitRatio: (event.clientX - rect.left) / Math.max(1, rect.width) })
+    }
+    const stop = (): void => setReflowDragging(false)
+    window.addEventListener('pointermove', move)
+    window.addEventListener('pointerup', stop, { once: true })
+    return () => { window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', stop) }
+  }, [reflowDragging, activeId, store])
 
   const scrollReadingUnitIntoView = useCallback((unit: ReadingUnit): void => {
     requestAnimationFrame(() => {
@@ -379,12 +396,13 @@ export function PdfWorkspace(): React.JSX.Element {
       if (!id || !paneRef.current?.contains(event.target as Node)) return
       if (id && event.key.toLowerCase() === 'z' && !event.shiftKey) { event.preventDefault(); store.undo(id) }
       if (id && (event.key.toLowerCase() === 'y' || (event.key.toLowerCase() === 'z' && event.shiftKey))) { event.preventDefault(); store.redo(id) }
-      if (event.key === '+' || event.key === '=') { event.preventDefault(); changeZoom(1) }
-      if (event.key === '-') { event.preventDefault(); changeZoom(-1) }
-      if (event.key === '0') { event.preventDefault(); applyZoom(1) }
+      const reflowOnly = useWorkspaceStore.getState().documents[id]?.reflow.mode === 'reflow'
+      if (event.key === '+' || event.key === '=') { event.preventDefault(); reflowOnly ? onTypography({ ...typography, fontScale: Math.min(1.6, typography.fontScale + .05) }) : changeZoom(1) }
+      if (event.key === '-') { event.preventDefault(); reflowOnly ? onTypography({ ...typography, fontScale: Math.max(.8, typography.fontScale - .05) }) : changeZoom(-1) }
+      if (event.key === '0') { event.preventDefault(); reflowOnly ? onTypography({ ...typography, fontScale: 1 }) : applyZoom(1) }
     }
     window.addEventListener('keydown', keydown); return () => window.removeEventListener('keydown', keydown)
-  }, [applyZoom, changeZoom, store])
+  }, [applyZoom, changeZoom, store, typography, onTypography])
 
   useEffect(() => {
     const keydown = (event: KeyboardEvent): void => {
@@ -394,7 +412,7 @@ export function PdfWorkspace(): React.JSX.Element {
       const state = useWorkspaceStore.getState()
       const documentId = state.activeDocumentId
       const tab = documentId ? state.documents[documentId] : undefined
-      if (!documentId || !tab?.focus.enabled) return
+      if (!documentId || !tab?.focus.enabled || tab.reflow.mode === 'reflow') return
       if (event.key === 'Escape') {
         event.preventDefault()
         state.setFocus(documentId, { enabled: false })
@@ -467,14 +485,17 @@ export function PdfWorkspace(): React.JSX.Element {
   }, [])
 
   useEffect(() => setSelectionPageRange(null), [activeId])
+  useEffect(() => { semanticDocumentRef.current = null; setMatches([]); setMatchIndex(0) }, [activeId])
 
   useEffect(() => {
     const viewer = viewerRef.current
-    if (!viewer || !activeId || !pdf) return
+    if (!viewer || !activeId || !pdf || active?.reflow.mode === 'reflow') return
     let frame = 0
     const update = (): void => {
       cancelAnimationFrame(frame)
       frame = requestAnimationFrame(() => {
+        const live = useWorkspaceStore.getState().documents[activeId]
+        if (!live || live.reflow.mode === 'reflow' || viewer.clientHeight <= 0) return
         const pages = Array.from(viewer.querySelectorAll<HTMLElement>('.pdf-page'))
         if (!pages.length) return
         const center = viewer.scrollTop + viewer.clientHeight / 2
@@ -486,7 +507,7 @@ export function PdfWorkspace(): React.JSX.Element {
     }
     viewer.addEventListener('scroll', update, { passive: true })
     return () => { cancelAnimationFrame(frame); viewer.removeEventListener('scroll', update) }
-  }, [activeId, pdf])
+  }, [activeId, pdf, active?.reflow.mode])
 
   useEffect(() => () => { for (const timeout of saveTimers.current.values()) window.clearTimeout(timeout); for (const cached of pdfCache.current.values()) void cached.cleanup() }, [])
 
@@ -512,6 +533,13 @@ export function PdfWorkspace(): React.JSX.Element {
     store.setCurrentPage(activeId, next)
     requestAnimationFrame(() => requestAnimationFrame(() => document.getElementById(`pdf-page-${next}`)?.scrollIntoView({ block: 'start', behavior: 'smooth' })))
   }
+  useEffect(() => window.koibill.onReflowSourceRequested((documentId, pageNumber) => {
+    const state = useWorkspaceStore.getState()
+    if (!state.documents[documentId]) return
+    state.activate(documentId)
+    state.setReflow(documentId, { mode: 'split' })
+    window.setTimeout(() => goToPage(pageNumber), 60)
+  }), [activeId, pdf])
   const commitPageInput = (): void => {
     const page = Number(pageInput)
     if (Number.isInteger(page) && page > 0) goToPage(page)
@@ -524,8 +552,12 @@ export function PdfWorkspace(): React.JSX.Element {
   }
   const runSearch = async (event: React.FormEvent): Promise<void> => {
     event.preventDefault(); if (!pdf || !query.trim()) { setMatches([]); return }
-    setBusy(true); const needle = query.toLocaleLowerCase(); const found: number[] = []
-    for (let index = 1; index <= pdf.numPages; index += 1) { const text = await (await pdf.getPage(index)).getTextContent(); if (text.items.map((item) => 'str' in item ? item.str : '').join(' ').toLocaleLowerCase().includes(needle)) found.push(index) }
+    setBusy(true); const needle = query.toLocaleLowerCase(); let found: number[] = []
+    if (active?.reflow.mode !== 'original' && semanticDocumentRef.current) {
+      found = [...new Set(semanticDocumentRef.current.blocks.filter((block) => block.text.toLocaleLowerCase().includes(needle)).flatMap((block) => block.sourceSpans.map((span) => span.pageNumber)))]
+    } else {
+      for (let index = 1; index <= pdf.numPages; index += 1) { const text = await (await pdf.getPage(index)).getTextContent(); if (text.items.map((item) => 'str' in item ? item.str : '').join(' ').toLocaleLowerCase().includes(needle)) found.push(index) }
+    }
     setMatches(found); setMatchIndex(0); setBusy(false)
     if (found[0]) { setMessage(''); goToPage(found[0]) }
     else setMessage(`No matches for “${query.trim()}”.`)
@@ -555,22 +587,43 @@ export function PdfWorkspace(): React.JSX.Element {
     <header className="pdf-topbar"><div className="brand">koibill</div><button className="toolbar-button" onClick={openPdf}><FolderOpen size={16}/> Import PDFs</button><button className="toolbar-button" disabled={!pdf} onClick={exportPdf}><FileDown size={16}/> Export</button><span className="toolbar-spacer"/>{active && <span className="document-title">{active.descriptor.name}</span>}</header>
     <div className="pdf-tab-strip" role="tablist">{store.order.map((id) => { const tab = store.documents[id]; return <div draggable onDragStart={(event) => event.dataTransfer.setData('text/koibill-pdf-tab', id)} onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); const source = event.dataTransfer.getData('text/koibill-pdf-tab'); let from = store.order.indexOf(source); const to = store.order.indexOf(id); while (from >= 0 && from !== to) { const direction = from < to ? 1 : -1; store.move(source, direction); from += direction } }} className={`pdf-tab ${id === activeId ? 'active' : ''}`} key={id}><button role="tab" onClick={() => activateTab(id)}>{tab.descriptor.name}{tab.status === 'missing' ? ' — missing' : ''}</button><button aria-label={`Close ${tab.descriptor.name}`} onClick={() => closeTab(id)}><X size={12}/></button></div> })}<button className="icon-button small" aria-label="Import PDFs" onClick={openPdf}><Plus size={14}/></button></div>
     <div className="annotation-toolbar" aria-label="PDF tools">
-      {([['select', MousePointer2, 'Select text'], ['highlight', Highlighter, 'Highlight'], ['pen', Pencil, 'Pen'], ['eraser', Eraser, 'Object eraser']] as const).map(([tool, Icon, label]) => <button key={tool} className={`tool-button ${store.tool === tool ? 'active' : ''}`} onClick={() => store.setTool(tool)} title={label}><Icon size={16}/></button>)}
+      {([['select', MousePointer2, 'Select text'], ['highlight', Highlighter, 'Highlight'], ['pen', Pencil, 'Pen'], ['eraser', Eraser, 'Object eraser']] as const).map(([tool, Icon, label]) => <button key={tool} disabled={active?.reflow.mode === 'reflow'} className={`tool-button ${store.tool === tool ? 'active' : ''}`} onClick={() => store.setTool(tool)} title={active?.reflow.mode === 'reflow' ? `${label} is available in Original or Split view` : label}><Icon size={16}/></button>)}
       <span className="toolbar-divider"/><div className="color-row">{(store.tool === 'highlight' ? highlightColors : penColors).map((color) => <button key={color} className={`color-swatch ${(store.tool === 'highlight' ? store.highlightColor : store.penColor) === color ? 'selected' : ''}`} style={{ backgroundColor: color }} aria-label={color} onClick={() => store.tool === 'highlight' ? store.setHighlightColor(color) : store.setPenColor(color)}/>)}</div>
       {store.tool === 'pen' && <select aria-label="Pen width" value={store.penWidth} onChange={(event) => store.setPenWidth(Number(event.target.value))}><option value={1}>Fine</option><option value={2}>Medium</option><option value={4}>Broad</option></select>}
       <span className="toolbar-divider"/><button className="tool-button" disabled={!active?.past.length} onClick={() => activeId && store.undo(activeId)} title="Undo"><Undo2 size={16}/></button><button className="tool-button" disabled={!active?.future.length} onClick={() => activeId && store.redo(activeId)} title="Redo"><Redo2 size={16}/></button>
-      <button className="tool-button" disabled={!active} aria-label="Zoom out" title="Zoom out (Ctrl+-)" onClick={() => changeZoom(-1)}><ZoomOut size={16}/></button><select className="pdf-zoom-select" aria-label="PDF zoom" disabled={!active} value={zoomSteps.includes(active?.zoom ?? 1) ? (active?.zoom ?? 1) : 'custom'} onChange={(event) => event.target.value !== 'custom' && applyZoom(Number(event.target.value))}>{!zoomSteps.includes(active?.zoom ?? 1) && <option value="custom">{Math.round((active?.zoom ?? 1) * 100)}%</option>}{zoomSteps.map((step) => <option key={step} value={step}>{Math.round(step * 100)}%</option>)}</select><button className="tool-button" disabled={!active} aria-label="Zoom in" title="Zoom in (Ctrl++)" onClick={() => changeZoom(1)}><ZoomIn size={16}/></button><button className="fit-button" disabled={!active} title="Fit page width" onClick={() => void fitWidth()}>Width</button><button className="tool-button" disabled={!active} aria-label="Fit page" title="Fit whole page" onClick={() => void fitPage()}><Maximize2 size={15}/></button><button className="tool-button" disabled={!active} aria-label="Rotate page" title="Rotate clockwise" onClick={rotatePdf}><RotateCw size={16}/></button>
-      <span className="toolbar-divider"/><button className={`tool-button ${active?.focus.enabled ? 'active' : ''}`} disabled={!active} aria-pressed={active?.focus.enabled ?? false} title="Focus reading" onClick={toggleFocus}><ScanText size={16}/></button>
-      {active?.focus.enabled && <div className="focus-controls"><select aria-label="Focus reading unit" value={active.focus.unit} onChange={(event) => changeFocusUnit(event.target.value as PdfFocusUnit)}><option value="line">Line</option><option value="sentence">Sentence</option><option value="paragraph">Paragraph</option></select><label title="Visibility outside the focused text"><span>{Math.round(active.focus.surroundingVisibility * 100)}% visible</span><input aria-label="Surrounding visibility" type="range" min="5" max="40" step="5" value={Math.round(active.focus.surroundingVisibility * 100)} onChange={(event) => activeId && store.setFocus(activeId, { surroundingVisibility: Number(event.target.value) / 100 })}/></label><label title="Focused text magnification"><span>{Math.round((active.focus.magnification ?? 1.25) * 100)}% lens</span><input aria-label="Focus magnification" type="range" min="110" max="160" step="5" value={Math.round((active.focus.magnification ?? 1.25) * 100)} onChange={(event) => activeId && store.setFocus(activeId, { magnification: Number(event.target.value) / 100 })}/></label><small>J/K or ↑/↓ · Esc</small></div>}
+      <button className="tool-button" disabled={!active || active.reflow.mode === 'reflow'} aria-label="Zoom out" title="Zoom out (Ctrl+-)" onClick={() => changeZoom(-1)}><ZoomOut size={16}/></button><select className="pdf-zoom-select" aria-label="PDF zoom" disabled={!active || active.reflow.mode === 'reflow'} value={zoomSteps.includes(active?.zoom ?? 1) ? (active?.zoom ?? 1) : 'custom'} onChange={(event) => event.target.value !== 'custom' && applyZoom(Number(event.target.value))}>{!zoomSteps.includes(active?.zoom ?? 1) && <option value="custom">{Math.round((active?.zoom ?? 1) * 100)}%</option>}{zoomSteps.map((step) => <option key={step} value={step}>{Math.round(step * 100)}%</option>)}</select><button className="tool-button" disabled={!active || active.reflow.mode === 'reflow'} aria-label="Zoom in" title="Zoom in (Ctrl++)" onClick={() => changeZoom(1)}><ZoomIn size={16}/></button><button className="fit-button" disabled={!active || active.reflow.mode === 'reflow'} title="Fit page width" onClick={() => void fitWidth()}>Width</button><button className="tool-button" disabled={!active || active.reflow.mode === 'reflow'} aria-label="Fit page" title="Fit whole page" onClick={() => void fitPage()}><Maximize2 size={15}/></button><button className="tool-button" disabled={!active || active.reflow.mode === 'reflow'} aria-label="Rotate page" title="Rotate clockwise" onClick={rotatePdf}><RotateCw size={16}/></button>
+      <span className="toolbar-divider"/><button className={`tool-button ${active?.focus.enabled ? 'active' : ''}`} disabled={!active || active.reflow.mode === 'reflow'} aria-pressed={active?.focus.enabled ?? false} title="Focus reading" onClick={toggleFocus}><ScanText size={16}/></button>
+      {active?.focus.enabled && active.reflow.mode !== 'reflow' && <div className="focus-controls"><select aria-label="Focus reading unit" value={active.focus.unit} onChange={(event) => changeFocusUnit(event.target.value as PdfFocusUnit)}><option value="line">Line</option><option value="sentence">Sentence</option><option value="paragraph">Paragraph</option></select><label title="Visibility outside the focused text"><span>{Math.round(active.focus.surroundingVisibility * 100)}% visible</span><input aria-label="Surrounding visibility" type="range" min="5" max="40" step="5" value={Math.round(active.focus.surroundingVisibility * 100)} onChange={(event) => activeId && store.setFocus(activeId, { surroundingVisibility: Number(event.target.value) / 100 })}/></label><label title="Focused text magnification"><span>{Math.round((active.focus.magnification ?? 1.25) * 100)}% lens</span><input aria-label="Focus magnification" type="range" min="110" max="160" step="5" value={Math.round((active.focus.magnification ?? 1.25) * 100)} onChange={(event) => activeId && store.setFocus(activeId, { magnification: Number(event.target.value) / 100 })}/></label><small>J/K or ↑/↓ · Esc</small></div>}
     </div>
-    <div className="reader-controls"><button className="icon-button" onClick={() => setSidebarOpen((value) => !value)}><Menu size={16}/></button><label className="page-control">Page <input type="number" min={1} max={pdf?.numPages ?? 1} value={pageInput} onChange={(event) => setPageInput(event.target.value)} onBlur={commitPageInput} onKeyDown={(event) => { if (event.key === 'Enter') { event.preventDefault(); commitPageInput(); event.currentTarget.blur() } }}/> / {pdf?.numPages ?? 0}</label><form className="pdf-search" onSubmit={(event) => void runSearch(event)}><Search size={14}/><input placeholder="Search document" value={query} onChange={(event) => setQuery(event.target.value)}/>{matches.length > 0 && <button type="button" onClick={nextMatch}>{matchIndex + 1}/{matches.length}</button>}</form></div>
+    <div className="reader-controls"><button className="icon-button" onClick={() => setSidebarOpen((value) => !value)}><Menu size={16}/></button><label className="page-control">Page <input type="number" min={1} max={pdf?.numPages ?? 1} value={pageInput} onChange={(event) => setPageInput(event.target.value)} onBlur={commitPageInput} onKeyDown={(event) => { if (event.key === 'Enter') { event.preventDefault(); commitPageInput(); event.currentTarget.blur() } }}/> / {pdf?.numPages ?? 0}</label><div className="reflow-mode-switcher" role="group" aria-label="PDF view mode"><BookOpenText size={14}/>{(['original', 'reflow', 'split'] as ReflowViewMode[]).map((mode) => <button key={mode} className={active?.reflow.mode === mode ? 'active' : ''} disabled={!active} onClick={() => activeId && store.setReflow(activeId, { mode })}>{mode[0].toUpperCase() + mode.slice(1)}</button>)}</div>{active?.reflow.mode !== 'original' && <div className="reflow-typography"><label title="Article font size">Text <input aria-label="Reflow font size" type="range" min="80" max="160" step="5" value={Math.round(typography.fontScale * 100)} onChange={(event) => onTypography({ ...typography, fontScale: Number(event.target.value) / 100 })}/></label><label title="Article line spacing">Leading <input aria-label="Reflow line spacing" type="range" min="120" max="220" step="5" value={Math.round(typography.lineHeight * 100)} onChange={(event) => onTypography({ ...typography, lineHeight: Number(event.target.value) / 100 })}/></label><label title="Article reading width">Width <input aria-label="Reflow reading width" type="range" min="44" max="90" step="2" value={typography.measure} onChange={(event) => onTypography({ ...typography, measure: Number(event.target.value) })}/></label></div>}<form className="pdf-search" onSubmit={(event) => void runSearch(event)}><Search size={14}/><input placeholder="Search document" value={query} onChange={(event) => setQuery(event.target.value)}/>{matches.length > 0 && <button type="button" onClick={nextMatch}>{matchIndex + 1}/{matches.length}</button>}</form></div>
     <div className="reader-body">
       {sidebarOpen && <aside className="thumbnail-sidebar workspace-sidebar"><div className="sidebar-tabs">{(['pages','annotations','research'] as SidebarView[]).map((view) => <button key={view} className={sidebarView === view ? 'active' : ''} onClick={() => setSidebarView(view)}>{view[0].toUpperCase() + view.slice(1)}</button>)}</div>
         {sidebarView === 'pages' && (pdf ? Array.from({ length: pdf.numPages }, (_, index) => <Thumbnail key={index + 1} pageNumber={index + 1} getPage={getPage} active={active?.currentPage === index + 1} onClick={() => goToPage(index + 1)}/>) : <p className="sidebar-empty">No PDF selected</p>)}
         {sidebarView === 'annotations' && <AnnotationSidebar annotations={annotations} selectedId={store.selectedAnnotationId} onSelect={(annotation) => { store.selectAnnotation(annotation.id); goToPage(annotation.pageIndex + 1); const link = annotation.conversationLinks?.at(-1); if (link) void window.koibill.browserCommand({ type: 'activate-or-open', tabId: link.browserTabId, url: link.url }) }}/>} 
         {sidebarView === 'research' && <ResearchTray items={store.tray} question={store.question} promptLength={trayLength} provider={aiProvider} onProvider={setAIProvider} onQuestion={store.setQuestion} onNavigate={navigateToItem} onMove={store.moveTrayItem} onRemove={store.removeTrayItem} onClear={store.clearTray} onAsk={askTray}/>} 
       </aside>}
-      <div ref={viewerRef} className="pdf-viewer">{active?.status === 'missing' ? <div className="empty-state"><h1>Workspace PDF missing</h1><p>{active.descriptor.name} is missing from this workspace folder.</p></div> : pdf && active?.session && active.document ? Array.from({ length: pdf.numPages }, (_, index) => <PdfPage key={`${activeId}-${index + 1}`} pageNumber={index + 1} pageMetadata={active.document!.pages[index]} shouldRender={shouldRenderPdfPage(index + 1, active.currentPage, active.zoom, selectionPageRange)} getPage={getPage} scale={active.zoom} rotation={active.rotation} annotations={annotations} tool={store.tool} highlightColor={store.highlightColor} penColor={store.penColor} penWidth={store.penWidth} documentId={active.session!.documentId} sourceFingerprint={active.session!.fingerprint} documentName={active.session!.name} selectedAnnotationId={store.selectedAnnotationId} focusEnabled={active.focus.enabled} surroundingVisibility={active.focus.surroundingVisibility} focusMagnification={active.focus.magnification ?? 1.25} selectionActive={selectionPageRange !== null} activeReadingUnit={activeReadingUnits[active.session!.documentId] ?? null} onReadingMap={registerReadingMap} onFocusAt={focusAt} onAdd={(annotation) => store.addAnnotation(active.session!.documentId, annotation)} onRemove={(id) => store.removeAnnotation(active.session!.documentId, id)} onSelectAnnotation={(id) => { store.selectAnnotation(id); if (id) setSidebarView('annotations') }}/>) : <div className="empty-state"><div className="empty-mark">K</div><h1>Read, mark, ask.</h1><p>{message}</p><button className="primary-button" onClick={openPdf}>Import PDFs</button></div>}</div>
+      <div className={`pdf-content-layout mode-${active?.reflow.mode ?? 'original'} ${reflowDragging ? 'resizing' : ''}`} style={active?.reflow.mode === 'split' ? { gridTemplateColumns: `minmax(0, ${active.reflow.splitRatio}fr) 6px minmax(0, ${1 - active.reflow.splitRatio}fr)` } : undefined}>
+        <div ref={viewerRef} className="pdf-viewer original-surface">{active?.status === 'missing' ? <div className="empty-state"><h1>Workspace PDF missing</h1><p>{active.descriptor.name} is missing from this workspace folder.</p></div> : pdf && active?.session && active.document ? Array.from({ length: pdf.numPages }, (_, index) => <PdfPage key={`${activeId}-${index + 1}`} pageNumber={index + 1} pageMetadata={active.document!.pages[index]} shouldRender={active.reflow.mode !== 'reflow' && shouldRenderPdfPage(index + 1, active.currentPage, active.zoom, selectionPageRange)} getPage={getPage} scale={active.zoom} rotation={active.rotation} annotations={annotations} tool={store.tool} highlightColor={store.highlightColor} penColor={store.penColor} penWidth={store.penWidth} documentId={active.session!.documentId} sourceFingerprint={active.session!.fingerprint} documentName={active.session!.name} selectedAnnotationId={store.selectedAnnotationId} focusEnabled={active.focus.enabled} surroundingVisibility={active.focus.surroundingVisibility} focusMagnification={active.focus.magnification ?? 1.25} selectionActive={selectionPageRange !== null} activeReadingUnit={activeReadingUnits[active.session!.documentId] ?? null} onReadingMap={registerReadingMap} onFocusAt={focusAt} onAdd={(annotation) => store.addAnnotation(active.session!.documentId, annotation)} onRemove={(id) => store.removeAnnotation(active.session!.documentId, id)} onSelectAnnotation={(id) => { store.selectAnnotation(id); if (id) setSidebarView('annotations') }}/>) : <div className="empty-state"><div className="empty-mark">K</div><h1>Read, mark, ask.</h1><p>{message}</p><button className="primary-button" onClick={openPdf}>Import PDFs</button></div>}</div>
+        {active?.reflow.mode === 'split' && <div className="reflow-divider" role="separator" aria-label="Resize original and semantic views" aria-orientation="vertical" aria-valuemin={25} aria-valuemax={75} aria-valuenow={Math.round(active.reflow.splitRatio * 100)} onPointerDown={() => setReflowDragging(true)}/>}
+        {active && active.reflow.mode !== 'original' && pdf && active.session && <SemanticReflow
+          pdf={pdf}
+          sessionId={active.session.id}
+          documentId={active.session.documentId}
+          fingerprint={active.session.fingerprint}
+          documentName={active.session.name}
+          currentPage={active.currentPage}
+          query={query}
+          typography={typography}
+          onTypography={onTypography}
+          onDocument={(document) => { semanticDocumentRef.current = document }}
+          onPage={(page) => activeId && store.setCurrentPage(activeId, page)}
+          onSource={(page) => {
+            if (!activeId) return
+            if (active.reflow.mode === 'reflow') store.setReflow(activeId, { mode: 'split' })
+            window.setTimeout(() => goToPage(page), active.reflow.mode === 'reflow' ? 50 : 0)
+          }}
+        />}
+      </div>
     </div>
     {selectedAnnotation && activeId && <AnnotationDetail annotation={selectedAnnotation} provider={aiProvider} onProvider={setAIProvider} onClose={() => store.selectAnnotation(null)} onNote={(note) => store.updateAnnotationNote(activeId, selectedAnnotation.id, note)} onTray={() => addAnnotationToTray(selectedAnnotation)} onAsk={(mode) => askAnnotation(selectedAnnotation, mode)} onOpen={(link) => void window.koibill.browserCommand({ type: 'activate-or-open', tabId: link.browserTabId, url: link.url })} onRemoveLink={(linkId) => store.removeConversationLink(activeId, selectedAnnotation.id, linkId)}/>} 
     {pendingRequestId && <div className="pending-link">{pendingMessage} <button onClick={() => { window.koibill.cancelAskAI(pendingRequestId); setPendingRequestId(null) }}>Cancel</button></div>}
@@ -584,7 +637,7 @@ export function PdfWorkspace(): React.JSX.Element {
 function workspaceViewStates(state: Pick<ReturnType<typeof useWorkspaceStore.getState>, 'order' | 'documents'>): Record<string, PdfViewState> {
   return Object.fromEntries(state.order.flatMap((id) => {
     const document = state.documents[id]
-    return document ? [[id, { zoom: document.zoom, rotation: document.rotation, currentPage: document.currentPage, focus: document.focus }]] : []
+    return document ? [[id, { zoom: document.zoom, rotation: document.rotation, currentPage: document.currentPage, focus: document.focus, reflow: document.reflow }]] : []
   }))
 }
 

@@ -18,6 +18,5 @@ export function createAskAIProviderMenu(
 }
 
 function requestFor(base: SelectionMenuRequest, linkTargets: AnnotationReference[], provider: AskAIRequest['provider'], mode: AskAIRequest['mode']): AskAIRequest {
-  return { kind: 'selection', provider, requestId: randomUUID(), text: base.text, documentName: base.documentName, pageNumber: base.pageNumber, mode, linkTargets }
+  return { kind: 'selection', provider, requestId: randomUUID(), text: base.text, documentName: base.documentName, pageNumber: base.pageNumber, endPageNumber: base.endPageNumber, sourceSpans: base.sourceSpans, mode, linkTargets }
 }
-

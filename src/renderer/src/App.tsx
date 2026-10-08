@@ -5,7 +5,7 @@ import { NotesPane } from './components/NotesPane'
 import { GraphPane } from './components/GraphPane'
 import { PdfWorkspace } from './components/PdfWorkspace'
 import { WorkspaceChooser, WorkspaceMenu } from './components/WorkspaceMenu'
-import type { ResearchWorkspace, RightPaneMode, UiState, WorkspaceLibrarySettings } from '../../shared/types'
+import type { ReflowTypographySettings, ResearchWorkspace, RightPaneMode, UiState, WorkspaceLibrarySettings } from '../../shared/types'
 import { useWorkspaceStore } from './store'
 import { flushWorkspaceEditors, registerWorkspaceFlusher } from './persistence'
 
@@ -17,15 +17,17 @@ export function App(): React.JSX.Element {
   const [rightPaneMode, setRightPaneMode] = useState<RightPaneMode>('browser')
   const [rightPaneCollapsed, setRightPaneCollapsed] = useState(false)
   const [browserRevealReady, setBrowserRevealReady] = useState(false)
+  const [reflowTypography, setReflowTypography] = useState<ReflowTypographySettings>({ fontScale: 1, lineHeight: 1.65, measure: 68 })
   const [library, setLibrary] = useState<WorkspaceLibrarySettings>({ rootLabel: '', workspaces: [], activeWorkspaceId: null })
   const activeDocument = useWorkspaceStore((state) => state.activeDocumentId ? state.documents[state.activeDocumentId] : undefined)
   const setCurrentPage = useWorkspaceStore((state) => state.setCurrentPage)
 
   useEffect(() => {
-    void Promise.all([window.koibill.getUiState(), window.koibill.getWorkspaceLibrary()]).then(([{ splitRatio: stored, rightPaneMode: mode, rightPaneCollapsed: collapsed }, nextLibrary]) => {
+    void Promise.all([window.koibill.getUiState(), window.koibill.getWorkspaceLibrary()]).then(([{ splitRatio: stored, rightPaneMode: mode, rightPaneCollapsed: collapsed, reflowTypography: typography }, nextLibrary]) => {
       setSplitRatio(stored)
       setRightPaneMode(mode)
       setRightPaneCollapsed(collapsed)
+      setReflowTypography(typography)
       setLibrary(nextLibrary)
       setReady(true)
     })
@@ -61,6 +63,12 @@ export function App(): React.JSX.Element {
   }, [ready, rightPaneCollapsed])
 
   useEffect(() => {
+    if (!ready) return
+    const timeout = window.setTimeout(() => void window.koibill.saveUiState({ reflowTypography }), 250)
+    return () => window.clearTimeout(timeout)
+  }, [ready, reflowTypography])
+
+  useEffect(() => {
     if (rightPaneCollapsed) { setBrowserRevealReady(false); return }
     const timeout = window.setTimeout(() => setBrowserRevealReady(true), 190)
     return () => window.clearTimeout(timeout)
@@ -94,7 +102,7 @@ export function App(): React.JSX.Element {
         const current = useWorkspaceStore.getState()
         const viewStates = Object.fromEntries(current.order.flatMap((id) => {
           const document = current.documents[id]
-          return document ? [[id, { zoom: document.zoom, rotation: document.rotation, currentPage: document.currentPage, focus: document.focus }]] : []
+          return document ? [[id, { zoom: document.zoom, rotation: document.rotation, currentPage: document.currentPage, focus: document.focus, reflow: document.reflow }]] : []
         }))
         await window.koibill.completeWorkspaceFlush([], { documentIds: current.order, activeDocumentId: current.activeDocumentId, viewStates, tray: current.tray, question: current.question })
       } catch (error) { window.alert(`Unable to close safely: ${String(error)}`) }
@@ -114,7 +122,7 @@ export function App(): React.JSX.Element {
     <div className="app-root">
     <WorkspaceMenu library={library} onLibrary={setLibrary} onWorkspace={applyWorkspace}/>
     {!library.activeWorkspaceId ? <WorkspaceChooser library={library} onLibrary={setLibrary} onWorkspace={applyWorkspace}/> : <main ref={shellRef} className={`app-shell ${dragging ? 'resizing' : ''} ${rightPaneCollapsed ? 'right-collapsed' : ''}`} style={{ gridTemplateColumns: rightPaneCollapsed ? 'calc(100% - 28px) 28px 0px' : `calc(${splitRatio * 100}% - 3px) 6px calc(${(1 - splitRatio) * 100}% - 3px)` }}>
-      <PdfWorkspace />
+      <PdfWorkspace typography={reflowTypography} onTypography={setReflowTypography}/>
       <div className="split-handle" role="separator" aria-label="Resize panes" aria-orientation="vertical" aria-valuemin={25} aria-valuemax={80} aria-valuenow={Math.round(splitRatio * 100)} onPointerDown={() => { if (!rightPaneCollapsed) setDragging(true) }}><button className="pane-collapse-button" aria-label={rightPaneCollapsed ? 'Expand right pane' : 'Collapse right pane'} aria-expanded={!rightPaneCollapsed} title={`${rightPaneCollapsed ? 'Expand' : 'Collapse'} right pane (Ctrl+\\)`} onPointerDown={(event) => event.stopPropagation()} onClick={toggleRightPane}>{rightPaneCollapsed ? <PanelRightOpen size={15}/> : <PanelRightClose size={15}/>}</button></div>
       <section className="right-workspace" aria-label="Browser and notes workspace" aria-hidden={rightPaneCollapsed}>
         <nav className="right-mode-switcher" aria-label="Right pane mode">

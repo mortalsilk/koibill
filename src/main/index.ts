@@ -2,7 +2,7 @@ import path from 'node:path'
 import { app, BrowserWindow, clipboard, ipcMain, Menu } from 'electron'
 import { randomUUID } from 'node:crypto'
 import type { AnnotationFlushEntry, BrowserBounds, BrowserCommand, GraphAppendPayload, ResearchTrayItem, SelectionMenuRequest } from '../shared/types'
-import { isAnnotationDocument, isAskAIRequest, isBrowserBounds, isBrowserCommand, isGraphDocument, isWorkspaceUiState } from '../shared/validation'
+import { isAnnotationDocument, isAskAIRequest, isBrowserBounds, isBrowserCommand, isGraphDocument, isSemanticDocument, isWorkspaceUiState } from '../shared/validation'
 import { BrowserTabs } from './browser-tabs'
 import { createAskAIProviderMenu } from './ask-ai-menu'
 import { exportAnnotatedPdf } from './pdf-export'
@@ -215,6 +215,14 @@ function registerIpc(): void {
     if (!isTrustedSender(event) || typeof sessionId !== 'string' || !isGraphDocument(graph)) throw new Error('Invalid graph save request.')
     return pdfSessions.saveGraph(sessionId, graph)
   })
+  ipcMain.handle('reflow:get', (event, sessionId: unknown) => {
+    if (!isTrustedSender(event) || typeof sessionId !== 'string') throw new Error('Invalid reflow cache request.')
+    return pdfSessions.getReflowCache(sessionId)
+  })
+  ipcMain.handle('reflow:save', (event, sessionId: unknown, document: unknown) => {
+    if (!isTrustedSender(event) || typeof sessionId !== 'string' || !isSemanticDocument(document)) throw new Error('Invalid reflow cache save.')
+    return pdfSessions.saveReflowCache(sessionId, document)
+  })
   ipcMain.handle('pdf:export', (event, sessionId: unknown, document: unknown) => {
     if (!isTrustedSender(event) || typeof sessionId !== 'string' || !isAnnotationDocument(document)) throw new Error('Invalid PDF export request.')
     return exportAnnotatedPdf(pdfSessions, sessionId, document)
@@ -228,6 +236,7 @@ function registerIpc(): void {
     const trayItem: ResearchTrayItem = {
       id: randomUUID(), documentId: base.documentId, sourceFingerprint: base.sourceFingerprint,
       documentName: base.documentName, pageNumber: base.pageNumber, text: base.text,
+      endPageNumber: base.endPageNumber, sourceSpans: base.sourceSpans,
       annotationId: base.annotationId, createdAt: new Date().toISOString(),
     }
     Menu.buildFromTemplate([
@@ -239,10 +248,11 @@ function registerIpc(): void {
       { label: 'Append to graph', click: () => {
         const payload: GraphAppendPayload = {
           documentId: base.documentId,
-          source: { kind: 'pdf', excerpt: base.text, pageNumber: base.pageNumber, title: base.documentName },
+          source: { kind: 'pdf', excerpt: base.text, pageNumber: base.pageNumber, endPageNumber: base.endPageNumber, sourceSpans: base.sourceSpans, title: base.documentName },
         }
         mainWindow?.webContents.send('graph:append', payload)
       } },
+      ...(base.reflow ? [{ label: 'Show in original PDF', click: () => mainWindow?.webContents.send('reflow:show-source', base.documentId, base.pageNumber) }] : []),
       { type: 'separator' },
       { role: 'copy', label: 'Copy' },
     ]).popup({ window: mainWindow ?? undefined })
@@ -280,11 +290,19 @@ function registerIpc(): void {
     if (splitRatio >= 0.25 && splitRatio <= 0.8) update.splitRatio = splitRatio
     if (candidate.rightPaneMode === 'browser' || candidate.rightPaneMode === 'notes' || candidate.rightPaneMode === 'graph') update.rightPaneMode = candidate.rightPaneMode
     if (typeof candidate.rightPaneCollapsed === 'boolean') settings.update({ rightPaneCollapsed: candidate.rightPaneCollapsed })
+    if (candidate.reflowTypography && typeof candidate.reflowTypography === 'object') {
+      const typography = candidate.reflowTypography as Record<string, unknown>
+      if (Number(typography.fontScale) >= .8 && Number(typography.fontScale) <= 1.6
+        && Number(typography.lineHeight) >= 1.2 && Number(typography.lineHeight) <= 2.2
+        && Number(typography.measure) >= 44 && Number(typography.measure) <= 90) {
+        settings.update({ reflowTypography: { fontScale: Number(typography.fontScale), lineHeight: Number(typography.lineHeight), measure: Number(typography.measure) } })
+      }
+    }
     if (Object.keys(update).length) return workspaceLibrary.updateUi(update)
   })
   ipcMain.handle('ui:get', (event) => isTrustedSender(event)
-    ? { ...workspaceLibrary.activeUi, rightPaneCollapsed: settings.snapshot.rightPaneCollapsed }
-    : { splitRatio: 0.55, rightPaneMode: 'browser', rightPaneCollapsed: false })
+    ? { ...workspaceLibrary.activeUi, rightPaneCollapsed: settings.snapshot.rightPaneCollapsed, reflowTypography: settings.snapshot.reflowTypography }
+    : { splitRatio: 0.55, rightPaneMode: 'browser', rightPaneCollapsed: false, reflowTypography: { fontScale: 1, lineHeight: 1.65, measure: 68 } })
 }
 
 function isPageNumber(value: unknown): value is number {
