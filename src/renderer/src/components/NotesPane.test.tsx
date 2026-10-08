@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
 import React from 'react'
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { KoibillApi } from '../../../shared/types'
 import { NotesPane } from './NotesPane'
@@ -78,5 +78,21 @@ describe('per-page Markdown notes', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Create document note' }))
     await waitFor(() => expect(createDocumentNote).toHaveBeenCalledWith('session-1'))
     expect((await screen.findByRole('textbox', { name: 'Markdown note for entire PDF' }) as HTMLTextAreaElement).value).toBe('# Field Guide\n\n')
+  })
+
+  it('keeps Markdown formatting available through the compact overflow menu', async () => {
+    window.koibill = {
+      getPageNote: vi.fn().mockResolvedValue({ pageNumber: 2, exists: true, content: 'Existing note', pathLabel: 'notes/page-0002.md' }),
+      savePageNote: vi.fn().mockResolvedValue({ pageNumber: 2, exists: true, content: '', pathLabel: 'notes/page-0002.md' }),
+      onWorkspaceFlushRequest: vi.fn(() => () => undefined),
+      browserCommand: vi.fn(),
+    } as unknown as KoibillApi
+
+    render(<NotesPane active sessionId="session-1" documentName="Field Guide.pdf" pageNumber={2} onOpenBrowser={() => undefined}/>)
+    const editor = await screen.findByRole('textbox', { name: 'Markdown note for page 2' }) as HTMLTextAreaElement
+    fireEvent.click(screen.getByRole('button', { name: 'Markdown formatting' }))
+    fireEvent.click(within(screen.getByRole('dialog', { name: 'Markdown formatting' })).getByRole('button', { name: 'Bold' }))
+    expect(editor.value).toBe('**text**Existing note')
+    expect(screen.queryByRole('dialog', { name: 'Markdown formatting' })).toBeNull()
   })
 })

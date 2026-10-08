@@ -1,6 +1,6 @@
 {
   "name": "koibill",
-  "version": "0.10.0",
+  "version": "0.11.0",
   "description": "A focused PDF annotation and Markdown research workspace with an integrated browser.",
   "main": "./out/main/index.js",
   "author": {
@@ -21,7 +21,6 @@
     "dist:linux": "pnpm build && electron-builder --linux AppImage deb"
   },
   "dependencies": {
-    "@vitejs/plugin-react": "latest",
     "@xyflow/react": "^12.12.0",
     "lucide-react": "latest",
     "pdf-lib": "1.17.1",
@@ -33,6 +32,7 @@
     "zustand": "5.0.15"
   },
   "devDependencies": {
+    "@vitejs/plugin-react": "latest",
     "@testing-library/jest-dom": "latest",
     "@testing-library/react": "latest",
     "@types/node": "latest",

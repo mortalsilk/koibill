@@ -2,3 +2,6 @@ allowBuilds:
   electron: true
   electron-winstaller: true
   esbuild: true
+overrides:
+  http-cache-semantics: 4.3.0
+  source-map-js: 1.2.2

@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { Bold, Braces, CheckSquare, Eye, Heading2, Italic, Link, List, ListOrdered, PencilLine, Quote, Rows3 } from 'lucide-react'
+import { Bold, Braces, CheckSquare, Ellipsis, Eye, Heading2, Italic, Link, List, ListOrdered, PencilLine, Quote, Rows3 } from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { registerWorkspaceFlusher } from '../persistence'
+import { Popover } from './ui/Popover'
 
 type ViewMode = 'edit' | 'split' | 'preview'
 type NoteScope = 'document' | 'page'
@@ -22,6 +23,7 @@ export function NotesPane({ active, sessionId, documentName, pageNumber, onOpenB
   const [state, setState] = useState<'idle' | 'loading' | 'missing' | 'ready' | 'saving' | 'error'>('idle')
   const [pathLabel, setPathLabel] = useState('')
   const [error, setError] = useState('')
+  const [formatOpen, setFormatOpen] = useState(false)
   const editorRef = useRef<HTMLTextAreaElement>(null)
   const noteRef = useRef<{ sessionId: string; scope: NoteScope; pageNumber?: number; value: string; dirty: boolean } | null>(null)
   const words = value.trim() ? value.trim().split(/\s+/u).length : 0
@@ -166,6 +168,7 @@ export function NotesPane({ active, sessionId, documentName, pageNumber, onOpenB
           <button disabled={!editingAvailable} title="Inline code" onClick={() => wrap('`', '`', 'code')}><Braces size={15}/></button>
           <button disabled={!editingAvailable} title="Link" onClick={() => wrap('[', '](https://)', 'label')}><Link size={15}/></button>
         </div>
+        <div className="notes-format-overflow"><Popover label="Markdown formatting" open={formatOpen} onOpenChange={setFormatOpen} align="end" trigger={<button aria-label="Markdown formatting"><Ellipsis size={16}/></button>}><div className="popover-menu"><button disabled={!editingAvailable} onClick={() => { line('## ', 'Heading'); setFormatOpen(false) }}><Heading2 size={15}/><span>Heading</span></button><button disabled={!editingAvailable} onClick={() => { wrap('**', '**'); setFormatOpen(false) }}><Bold size={15}/><span>Bold</span></button><button disabled={!editingAvailable} onClick={() => { wrap('_', '_'); setFormatOpen(false) }}><Italic size={15}/><span>Italic</span></button><button disabled={!editingAvailable} onClick={() => { line('- ', 'List item'); setFormatOpen(false) }}><List size={15}/><span>Bulleted list</span></button><button disabled={!editingAvailable} onClick={() => { line('1. ', 'List item'); setFormatOpen(false) }}><ListOrdered size={15}/><span>Numbered list</span></button><button disabled={!editingAvailable} onClick={() => { line('- [ ] ', 'Task'); setFormatOpen(false) }}><CheckSquare size={15}/><span>Task</span></button><button disabled={!editingAvailable} onClick={() => { line('> ', 'Quote'); setFormatOpen(false) }}><Quote size={15}/><span>Quote</span></button><button disabled={!editingAvailable} onClick={() => { wrap('`', '`', 'code'); setFormatOpen(false) }}><Braces size={15}/><span>Inline code</span></button><button disabled={!editingAvailable} onClick={() => { wrap('[', '](https://)', 'label'); setFormatOpen(false) }}><Link size={15}/><span>Link</span></button></div></Popover></div>
         <div className="notes-view-modes" role="group" aria-label="Notes view">
           <button className={mode === 'edit' ? 'active' : ''} onClick={() => setMode('edit')} title="Edit"><PencilLine size={14}/><span>Edit</span></button>
           <button className={mode === 'split' ? 'active' : ''} onClick={() => setMode('split')} title="Split"><Rows3 size={14}/><span>Split</span></button>

@@ -289,7 +289,7 @@ function GraphCanvas({ active, sessionId, documentId, fingerprint, documentName,
         {!nodes.length && <div className="graph-empty overlay"><strong>Your idea graph starts here</strong><p>Double-click the canvas, create an idea, or append selected text from the PDF or browser.</p><button className="primary-button" onClick={() => addManualNode()}>Create first idea</button></div>}
       </>}
       {selectedNode && <aside className="graph-inspector">
-        <header><strong>Edit idea</strong><button onClick={() => setSelectedNodeId(null)}><X size={14}/></button></header>
+        <header><strong>Edit idea</strong><button aria-label="Close idea inspector" onClick={() => setSelectedNodeId(null)}><X size={14}/></button></header>
         <label>Title<input value={selectedNode.data.title} maxLength={500} onFocus={beginEdit} onBlur={finishEdit} onChange={(event) => updateSelected({ title: event.target.value })}/></label>
         <label>Your Markdown<textarea value={selectedNode.data.userText} maxLength={100_000} onFocus={beginEdit} onBlur={finishEdit} onChange={(event) => updateSelected({ userText: event.target.value })} placeholder="Connect the evidence in your own words…"/></label>
         {selectedNode.data.userText && <article className="graph-markdown"><ReactMarkdown remarkPlugins={[remarkGfm]}>{selectedNode.data.userText}</ReactMarkdown></article>}

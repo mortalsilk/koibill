@@ -17,6 +17,7 @@ export function App(): React.JSX.Element {
   const [rightPaneMode, setRightPaneMode] = useState<RightPaneMode>('browser')
   const [rightPaneCollapsed, setRightPaneCollapsed] = useState(false)
   const [browserRevealReady, setBrowserRevealReady] = useState(false)
+  const [appOverlayOpen, setAppOverlayOpen] = useState(false)
   const [reflowTypography, setReflowTypography] = useState<ReflowTypographySettings>({ fontScale: 1, lineHeight: 1.65, measure: 68 })
   const [library, setLibrary] = useState<WorkspaceLibrarySettings>({ rootLabel: '', workspaces: [], activeWorkspaceId: null })
   const activeDocument = useWorkspaceStore((state) => state.activeDocumentId ? state.documents[state.activeDocumentId] : undefined)
@@ -73,6 +74,14 @@ export function App(): React.JSX.Element {
     const timeout = window.setTimeout(() => setBrowserRevealReady(true), 190)
     return () => window.clearTimeout(timeout)
   }, [rightPaneCollapsed])
+
+  useEffect(() => {
+    const update = (): void => setAppOverlayOpen(Boolean(document.querySelector('.modal-backdrop, .import-overlay')))
+    const observer = new MutationObserver(update)
+    observer.observe(document.body, { childList: true, subtree: true })
+    update()
+    return () => observer.disconnect()
+  }, [])
 
   const showRightPane = useCallback((mode: RightPaneMode): void => {
     setRightPaneMode(mode)
@@ -131,7 +140,7 @@ export function App(): React.JSX.Element {
           <button className={rightPaneMode === 'graph' ? 'active' : ''} onClick={() => setRightPaneMode('graph')}>Graph</button>
         </nav>
         <div className={`right-surface ${rightPaneMode === 'browser' ? 'visible' : 'hidden'}`} aria-hidden={rightPaneMode !== 'browser'}>
-          <BrowserPane active={!rightPaneCollapsed && browserRevealReady && rightPaneMode === 'browser'} layoutKey={Math.round(splitRatio * 10_000) + (rightPaneCollapsed ? 1 : 0)} />
+          <BrowserPane active={!rightPaneCollapsed && browserRevealReady && !appOverlayOpen && rightPaneMode === 'browser'} layoutKey={Math.round(splitRatio * 10_000) + (rightPaneCollapsed ? 1 : 0) + (appOverlayOpen ? 2 : 0)} />
         </div>
         <div className={`right-surface ${rightPaneMode === 'notes' ? 'visible' : 'hidden'}`} aria-hidden={rightPaneMode !== 'notes'}>
           <NotesPane
