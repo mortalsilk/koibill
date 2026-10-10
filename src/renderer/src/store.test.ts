@@ -59,4 +59,17 @@ describe('multi-document workspace store', () => {
     expect(useWorkspaceStore.getState().documents.a.focus.surroundingVisibility).toBe(.4)
     expect(useWorkspaceStore.getState().documents.a.focus.magnification).toBe(1.6)
   })
+
+  it('tracks provider comparison progress and saved excerpts', () => {
+    const comparison = {
+      id: 'compare', title: 'Compare accounts', prompt: 'Prompt', promptEdited: false, contexts: [], linkTargets: [], excerpts: [],
+      providers: [{ provider: 'chatgpt' as const, state: 'queued' as const }, { provider: 'claude' as const, state: 'queued' as const }], createdAt: 'now', modifiedAt: 'now',
+    }
+    useWorkspaceStore.getState().addComparison(comparison)
+    useWorkspaceStore.getState().updateComparisonProvider('compare', 'claude', 'inserted', 'Inserted')
+    useWorkspaceStore.getState().addComparisonExcerpt('compare', { id: 'excerpt', provider: 'claude', text: 'Answer fragment', title: 'Claude', createdAt: 'now' })
+    const stored = useWorkspaceStore.getState().comparisons[0]
+    expect(stored.providers[1]).toMatchObject({ provider: 'claude', state: 'inserted', message: 'Inserted' })
+    expect(stored.excerpts[0].text).toBe('Answer fragment')
+  })
 })

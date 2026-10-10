@@ -89,6 +89,21 @@ describe('workspace library', () => {
     expect(library.activeBrowser.tabs[0].url).toBe('https://claude.ai/new')
   })
 
+  it('persists provider comparisons in the workspace companion file', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'koibill-comparisons-')); scratch.push(root)
+    const { library, settings } = harness(root)
+    await library.create('Comparisons')
+    const comparison = {
+      id: 'compare', title: 'Two readings', prompt: 'Compare these.', promptEdited: false, contexts: [], linkTargets: [], excerpts: [],
+      providers: [{ provider: 'chatgpt' as const, state: 'queued' as const }, { provider: 'claude' as const, state: 'inserted' as const }], createdAt: 'now', modifiedAt: 'now',
+    }
+    await library.saveState({ documentIds: [], activeDocumentId: null, viewStates: {}, tray: [], question: '', comparisons: [comparison] })
+    const workspacePath = settings().registeredWorkspaces[0].path
+    const stored = JSON.parse(await readFile(path.join(workspacePath, 'comparisons.json'), 'utf8'))
+    expect(stored).toMatchObject({ schemaVersion: 1, comparisons: [{ id: 'compare' }] })
+    expect(library.restore().comparisons?.[0].title).toBe('Two readings')
+  })
+
   it('rejects paths which escape the workspace', () => {
     expect(parseWorkspaceManifest({
       schemaVersion: 1, id: 'id', name: 'Unsafe', createdAt: 'now', modifiedAt: 'now', activeDocumentId: 'doc', tray: [], question: '',

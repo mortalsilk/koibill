@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { isAskAIRequest, isChatGptAuthCompletion, isChatGptConversationUrl, isGraphDocument, isSafeWebUrl, isWorkspaceUiState, migrateAnnotationDocument, normalizeNavigation } from './validation'
+import { isAIComparisonRecord, isAskAIComparisonRequest, isAskAIRequest, isChatGptAuthCompletion, isChatGptConversationUrl, isGraphDocument, isSafeWebUrl, isWorkspaceUiState, migrateAnnotationDocument, normalizeNavigation } from './validation'
 
 describe('web navigation validation', () => {
   it('allows HTTPS and the controlled blank page', () => {
@@ -36,6 +36,24 @@ describe('Ask AI validation', () => {
     expect(isAskAIRequest({ kind: 'selection', provider: 'gemini', requestId: '1', linkTargets: [], text: 'x'.repeat(20_001), documentName: 'paper.pdf', pageNumber: 1, mode: 'draft' })).toBe(false)
     expect(isAskAIRequest({ kind: 'selection', provider: 'unknown', requestId: '1', linkTargets: [], text: 'hello', documentName: 'paper.pdf', pageNumber: 1, mode: 'draft' })).toBe(false)
     expect(isAskAIRequest({ kind: 'selection', provider: 'chatgpt', requestId: '1', linkTargets: [], text: 'hello', documentName: 'paper.pdf', pageNumber: 1, mode: 'delete' })).toBe(false)
+  })
+
+  it('validates composed and multi-provider requests strictly', () => {
+    const context = { id: 'source', kind: 'selection', label: 'Passage', text: 'hello', enabled: true }
+    expect(isAskAIRequest({ kind: 'composed', provider: 'perplexity', requestId: '1', linkTargets: [], mode: 'send', prompt: 'Review this', contexts: [context], promptEdited: false })).toBe(true)
+    const comparison = { requestId: 'request', comparisonId: 'comparison', providers: ['chatgpt', 'claude'], prompt: 'Review this', contexts: [context], promptEdited: false, linkTargets: [] }
+    expect(isAskAIComparisonRequest(comparison)).toBe(true)
+    expect(isAskAIComparisonRequest({ ...comparison, providers: ['chatgpt', 'chatgpt'] })).toBe(false)
+    expect(isAskAIComparisonRequest({ ...comparison, providers: ['chatgpt'] })).toBe(false)
+  })
+
+  it('keeps comparison links bound to their provider', () => {
+    const base = {
+      id: 'comparison', title: 'Compare', prompt: 'Prompt', promptEdited: false, contexts: [], linkTargets: [], excerpts: [], createdAt: 'now', modifiedAt: 'now',
+      providers: [{ provider: 'chatgpt', state: 'inserted' }, { provider: 'claude', state: 'linked', conversationLink: { id: 'link', provider: 'claude', url: 'https://claude.ai/chat/abc', title: 'Chat', createdAt: 'now' } }],
+    }
+    expect(isAIComparisonRecord(base)).toBe(true)
+    expect(isAIComparisonRecord({ ...base, providers: [base.providers[0], { ...base.providers[1], provider: 'gemini' }] })).toBe(false)
   })
 })
 

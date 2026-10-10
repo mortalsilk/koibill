@@ -1,10 +1,10 @@
 import path from 'node:path'
 import { app, BrowserWindow, clipboard, ipcMain, Menu } from 'electron'
 import { randomUUID } from 'node:crypto'
-import type { AnnotationFlushEntry, BrowserBounds, BrowserCommand, GraphAppendPayload, ResearchTrayItem, SelectionMenuRequest } from '../shared/types'
-import { isAnnotationDocument, isAskAIRequest, isBrowserBounds, isBrowserCommand, isGraphDocument, isSemanticDocument, isWorkspaceUiState } from '../shared/validation'
+import type { AnnotationFlushEntry, AskAIComposerSeed, BrowserBounds, BrowserCommand, GraphAppendPayload, ResearchTrayItem, SelectionMenuRequest } from '../shared/types'
+import { isAnnotationDocument, isAskAIComparisonRequest, isAskAIRequest, isBrowserBounds, isBrowserCommand, isGraphDocument, isSemanticDocument, isWorkspaceUiState } from '../shared/validation'
 import { BrowserTabs } from './browser-tabs'
-import { createAskAIProviderMenu } from './ask-ai-menu'
+import { isAIProviderId } from '../shared/ai-providers'
 import { exportAnnotatedPdf } from './pdf-export'
 import { PdfSessionManager, SettingsStore } from './storage'
 import { WorkspaceLibrary } from './workspace-library'
@@ -12,6 +12,8 @@ import { WorkspaceLibrary } from './workspace-library'
 let mainWindow: BrowserWindow | null = null
 let browserTabs: BrowserTabs | null = null
 let allowWindowClose = false
+let rendererRecoveryAttempts = 0
+let rendererRecoveryReset: NodeJS.Timeout | undefined
 const settings = new SettingsStore()
 const workspaceLibrary = new WorkspaceLibrary(settings, (progress) => mainWindow?.webContents.send('pdf:import-progress', progress))
 const pdfSessions = new PdfSessionManager(settings, workspaceLibrary)
@@ -71,6 +73,17 @@ async function createWindow(): Promise<void> {
     browserTabs?.destroy()
     browserTabs = null
     mainWindow = null
+  })
+  mainWindow.webContents.on('did-finish-load', () => {
+    if (rendererRecoveryReset) clearTimeout(rendererRecoveryReset)
+    rendererRecoveryReset = setTimeout(() => { rendererRecoveryAttempts = 0; rendererRecoveryReset = undefined }, 30_000)
+  })
+  mainWindow.webContents.on('render-process-gone', (_event, details) => {
+    if (!mainWindow || mainWindow.isDestroyed() || details.reason === 'clean-exit') return
+    console.error(`koibill renderer stopped (${details.reason})`)
+    if (rendererRecoveryAttempts >= 1) return
+    rendererRecoveryAttempts += 1
+    setTimeout(() => { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.reload() }, 350)
   })
   mainWindow.once('ready-to-show', () => mainWindow?.show())
 
@@ -240,10 +253,18 @@ function registerIpc(): void {
       annotationId: base.annotationId, createdAt: new Date().toISOString(),
     }
     Menu.buildFromTemplate([
-      {
-        label: 'Ask AI',
-        submenu: createAskAIProviderMenu(base, linkTargets, (request) => void browserTabs?.askAI(request)),
-      },
+      { label: 'Ask AI…', click: () => {
+        const contexts: AskAIComposerSeed['contexts'] = [{
+          id: randomUUID(), kind: 'selection', label: 'Selected passage', text: base.text, enabled: true,
+          documentId: base.documentId, sourceFingerprint: base.sourceFingerprint, documentName: base.documentName,
+          pageNumber: base.pageNumber, endPageNumber: base.endPageNumber, sourceSpans: base.sourceSpans, annotationId: base.annotationId,
+        }]
+        if (base.nearbyText?.trim()) contexts.push({
+          id: randomUUID(), kind: 'nearby', label: 'Surrounding text', text: base.nearbyText.slice(0, 4_000), enabled: false,
+          documentId: base.documentId, sourceFingerprint: base.sourceFingerprint, documentName: base.documentName, pageNumber: base.pageNumber,
+        })
+        mainWindow?.webContents.send('ask-ai:compose', { instruction: 'Please help me understand this passage.', contexts, linkTargets } satisfies AskAIComposerSeed)
+      } },
       { label: 'Add to research tray', click: () => mainWindow?.webContents.send('research:tray:add', trayItem) },
       { label: 'Append to graph', click: () => {
         const payload: GraphAppendPayload = {
@@ -260,6 +281,14 @@ function registerIpc(): void {
   ipcMain.handle('ask-ai:run', async (event, request: unknown) => {
     if (!isTrustedSender(event) || !isAskAIRequest(request)) throw new Error('Invalid Ask AI request.')
     await browserTabs?.askAI(request)
+  })
+  ipcMain.handle('ask-ai:compare', async (event, request: unknown) => {
+    if (!isTrustedSender(event) || !isAskAIComparisonRequest(request)) throw new Error('Invalid AI comparison request.')
+    await browserTabs?.compareAI(request)
+  })
+  ipcMain.on('ask-ai:active-comparison', (event, comparisonId: unknown, providers: unknown) => {
+    if (!isTrustedSender(event) || (comparisonId !== null && typeof comparisonId !== 'string') || !Array.isArray(providers) || providers.length > 5 || !providers.every(isAIProviderId)) return
+    browserTabs?.setActiveComparison(comparisonId, providers)
   })
   ipcMain.on('ask-ai:retry', (event, request: unknown) => {
     if (isTrustedSender(event) && isAskAIRequest(request)) void browserTabs?.askAI(request)

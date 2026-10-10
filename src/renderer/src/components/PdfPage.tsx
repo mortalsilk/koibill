@@ -5,6 +5,7 @@ import type { Annotation, InkAnnotation, NormalizedPoint, PageMetadata } from '.
 import { findAnnotationAt, normalizePdfPoint, normalizePdfRect } from '../annotations'
 import { readingMapFromTextLayer, type PageReadingMap, type ReadingUnit } from '../pdf-reading-map'
 import { focusLensLayout } from '../pdf-focus-lens'
+import { isPdfRenderCancellation, observePdfRender } from '../pdf-render-lifecycle'
 
 interface PdfPageProps {
   pageNumber: number
@@ -43,6 +44,7 @@ export function PdfPage(props: PdfPageProps): React.JSX.Element {
   const textLayerHostRef = useRef<HTMLDivElement>(null)
   const pageRef = useRef<PDFPageProxy | null>(null)
   const viewportRef = useRef<PageViewport | null>(null)
+  const readingMapRef = useRef<PageReadingMap | null>(null)
   const draftRef = useRef<NormalizedPoint[] | null>(null)
   const [renderRevision, setRenderRevision] = useState(0)
   const [lensInteracting, setLensInteracting] = useState(false)
@@ -68,6 +70,7 @@ export function PdfPage(props: PdfPageProps): React.JSX.Element {
     }
     let cancelled = false
     let renderTask: ReturnType<PDFPageProxy['render']> | undefined
+    let renderPromise: Promise<boolean> | undefined
     let textLayerTask: TextLayerBuilder | undefined
     clearCanvas(focusLensRef.current)
     void props.getPage(props.pageNumber).then(async (page) => {
@@ -88,6 +91,9 @@ export function PdfPage(props: PdfPageProps): React.JSX.Element {
       const context = canvas.getContext('2d')
       if (!context) return
       renderTask = page.render({ canvas, canvasContext: context, viewport, transform: ratio === 1 ? undefined : [ratio, 0, 0, ratio, 0, 0] })
+      renderPromise = observePdfRender(renderTask.promise, () => cancelled, (error) => {
+        if (!cancelled) console.error('Unable to render PDF page canvas', error)
+      })
       textLayerTask = new TextLayerBuilder({
         pdfPage: page,
         onAppend: (layer: HTMLDivElement) => {
@@ -98,11 +104,13 @@ export function PdfPage(props: PdfPageProps): React.JSX.Element {
       textLayerTask.div.style.setProperty('--user-unit', String(viewport.userUnit))
       await textLayerTask.render({ viewport } as Parameters<TextLayerBuilder['render']>[0])
       if (cancelled) return
-      await renderTask.promise
-      if (cancelled) return
-      props.onReadingMap(readingMapFromTextLayer(textLayerTask.div, hostRef.current ?? textLayerTask.div, props.pageNumber))
+      const rendered = await renderPromise
+      if (cancelled || !rendered) return
+      const readingMap = readingMapFromTextLayer(textLayerTask.div, hostRef.current ?? textLayerTask.div, props.pageNumber)
+      readingMapRef.current = readingMap
+      props.onReadingMap(readingMap)
       setRenderRevision((revision) => revision + 1)
-    }).catch((error) => { if (!cancelled) console.error('Unable to render page', error) })
+    }).catch((error) => { if (!cancelled && !isPdfRenderCancellation(error)) console.error('Unable to render page', error) })
     return () => { cancelled = true; textLayerTask?.cancel(); renderTask?.cancel() }
   }, [props.shouldRender, props.getPage, props.pageNumber, props.scale, props.rotation, props.onReadingMap])
 
@@ -204,16 +212,28 @@ export function PdfPage(props: PdfPageProps): React.JSX.Element {
   }
 
   const showContextMenu = (event: React.MouseEvent): void => {
-    const selection = window.getSelection()?.toString().trim() ?? ''
+    const liveSelection = window.getSelection()
+    const selection = liveSelection?.toString().trim() ?? ''
     if (!selection) return
     event.preventDefault()
     if (selection.length > 20_000) {
       window.alert('Select a passage shorter than 20,000 characters.')
       return
     }
+    const hostRect = hostRef.current?.getBoundingClientRect()
+    const selectionRect = liveSelection?.rangeCount ? liveSelection.getRangeAt(0).getBoundingClientRect() : null
+    let nearbyText: string | undefined
+    if (hostRect && selectionRect && hostRect.width && hostRect.height) {
+      const x = (selectionRect.left + selectionRect.width / 2 - hostRect.left) / hostRect.width
+      const y = (selectionRect.top + selectionRect.height / 2 - hostRect.top) / hostRect.height
+      const paragraphs = readingMapRef.current?.units.paragraph ?? []
+      const index = paragraphs.findIndex((unit) => unit.rects.some((rect) => x >= rect.x && x <= rect.x + rect.width && y >= rect.y && y <= rect.y + rect.height))
+      if (index >= 0) nearbyText = paragraphs.slice(Math.max(0, index - 1), index + 2).map((unit) => unit.text).join('\n\n').slice(0, 4_000)
+    }
     window.koibill.showSelectionMenu({
       kind: 'selection', text: selection, documentId: props.documentId,
       sourceFingerprint: props.sourceFingerprint, documentName: props.documentName, pageNumber: props.pageNumber,
+      nearbyText,
     })
   }
 

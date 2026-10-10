@@ -66,4 +66,15 @@ describe('collapsible right workspace', () => {
     overlay.remove()
     await waitFor(() => expect(screen.getByTestId('browser-pane').getAttribute('data-active')).toBe('true'))
   })
+
+  it('detaches the embedded browser while a portalled popover is open', async () => {
+    render(<App/>)
+    await waitFor(() => expect(screen.getByTestId('browser-pane').getAttribute('data-active')).toBe('true'), { timeout: 500 })
+    const popover = document.createElement('div')
+    popover.className = 'ui-popover'
+    document.body.append(popover)
+    await waitFor(() => expect(screen.getByTestId('browser-pane').getAttribute('data-active')).toBe('false'))
+    popover.remove()
+    await waitFor(() => expect(screen.getByTestId('browser-pane').getAttribute('data-active')).toBe('true'))
+  })
 })

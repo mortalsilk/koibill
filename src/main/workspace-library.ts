@@ -3,14 +3,14 @@ import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import { app, dialog, shell } from 'electron'
 import type {
-  PdfImportProgress, ResearchWorkspace, UiState, WorkspaceBrowserState, WorkspaceDescriptor,
+  AIComparisonRecord, PdfImportProgress, ResearchWorkspace, UiState, WorkspaceBrowserState, WorkspaceDescriptor,
   WorkspaceDocumentRecord, WorkspaceLibrarySettings, WorkspaceManifest, WorkspaceSwitchResult, WorkspaceUiState,
 } from '../shared/types'
-import { isResearchTrayItem } from '../shared/validation'
+import { isAIComparisonRecord, isResearchTrayItem } from '../shared/validation'
 import type { SettingsStore } from './storage'
 
 interface RegisteredWorkspace { id: string; name: string; path: string; lastOpenedAt: string }
-interface ActiveWorkspace { path: string; manifest: WorkspaceManifest }
+interface ActiveWorkspace { path: string; manifest: WorkspaceManifest; comparisons: AIComparisonRecord[] }
 interface ImportedDocument { record: WorkspaceDocumentRecord; path: string; duplicate: boolean }
 
 const DEFAULT_UI: UiState = { splitRatio: .55, rightPaneMode: 'browser' }
@@ -61,7 +61,7 @@ export class WorkspaceLibrary {
 
   restore(): ResearchWorkspace {
     const manifest = this.active?.manifest
-    if (!manifest) return { schemaVersion: 1, documents: [], activeDocumentId: null, tray: [], question: '' }
+    if (!manifest) return { schemaVersion: 1, documents: [], activeDocumentId: null, tray: [], question: '', comparisons: [] }
     return {
       schemaVersion: 1,
       workspaceId: manifest.id,
@@ -72,6 +72,7 @@ export class WorkspaceLibrary {
       activeDocumentId: manifest.activeDocumentId,
       tray: manifest.tray,
       question: manifest.question,
+      comparisons: structuredClone(this.active?.comparisons ?? []),
     }
   }
 
@@ -88,7 +89,8 @@ export class WorkspaceLibrary {
     await fs.mkdir(path.join(directory, 'books'), { recursive: true })
     await fs.mkdir(path.join(directory, '.imports'), { recursive: true })
     await atomicWrite(path.join(directory, 'workspace.json'), JSON.stringify(manifest, null, 2))
-    this.active = { path: directory, manifest }
+    await atomicWrite(path.join(directory, 'comparisons.json'), JSON.stringify({ schemaVersion: 1, comparisons: [] }, null, 2))
+    this.active = { path: directory, manifest, comparisons: [] }
     this.unavailable.delete(manifest.id)
     this.register({ id, name: cleanName, path: directory, lastOpenedAt: timestamp })
     return { switched: true, workspace: this.restore(), ui: manifest.ui }
@@ -101,7 +103,7 @@ export class WorkspaceLibrary {
     const manifest = await readManifest(directory)
     await ensureWritable(directory)
     const timestamp = new Date().toISOString()
-    this.active = { path: directory, manifest }
+    this.active = { path: directory, manifest, comparisons: await readComparisons(directory) }
     this.unavailable.delete(manifest.id)
     this.register({ id: manifest.id, name: manifest.name, path: directory, lastOpenedAt: timestamp })
     await this.cleanupStaging()
@@ -163,10 +165,11 @@ export class WorkspaceLibrary {
     this.active.manifest.activeDocumentId = state.activeDocumentId
     this.active.manifest.tray = state.tray
     this.active.manifest.question = state.question
+    this.active.comparisons = structuredClone(state.comparisons ?? [])
     if (ui) this.active.manifest.ui = { ...this.active.manifest.ui, ...ui }
     if (browser) this.active.manifest.browser = structuredClone(browser)
     this.active.manifest.modifiedAt = new Date().toISOString()
-    await this.writeManifest()
+    await Promise.all([this.writeManifest(), this.writeComparisons()])
   }
 
   async setBrowser(browser: WorkspaceBrowserState): Promise<void> {
@@ -308,7 +311,7 @@ export class WorkspaceLibrary {
     const manifest = await readManifest(directory)
     if (manifest.id !== registered.id) throw new Error('Workspace identity does not match its registration.')
     await ensureWritable(directory)
-    this.active = { path: directory, manifest }
+    this.active = { path: directory, manifest, comparisons: await readComparisons(directory) }
     this.unavailable.delete(manifest.id)
     this.register({ ...registered, name: manifest.name, path: directory, lastOpenedAt: new Date().toISOString() })
     await this.cleanupStaging()
@@ -335,6 +338,30 @@ export class WorkspaceLibrary {
     const payload = JSON.stringify(this.active.manifest, null, 2)
     this.manifestWrite = this.manifestWrite.catch(() => undefined).then(() => atomicWrite(target, payload))
     return this.manifestWrite
+  }
+
+  private writeComparisons(): Promise<void> {
+    if (!this.active) return Promise.resolve()
+    const target = path.join(this.active.path, 'comparisons.json')
+    const payload = JSON.stringify({ schemaVersion: 1, comparisons: this.active.comparisons }, null, 2)
+    this.manifestWrite = this.manifestWrite.catch(() => undefined).then(() => atomicWrite(target, payload))
+    return this.manifestWrite
+  }
+}
+
+async function readComparisons(directory: string): Promise<AIComparisonRecord[]> {
+  try {
+    const value = JSON.parse(await fs.readFile(path.join(directory, 'comparisons.json'), 'utf8')) as Record<string, unknown>
+    if (value.schemaVersion !== 1 || !Array.isArray(value.comparisons) || value.comparisons.length > 100 || !value.comparisons.every(isAIComparisonRecord)) throw new Error('Invalid comparisons file.')
+    return (value.comparisons as AIComparisonRecord[]).map((comparison) => ({
+      ...comparison,
+      providers: comparison.providers.map((provider) => ['queued', 'loading', 'pending'].includes(provider.state)
+        ? { ...provider, state: 'cancelled', message: 'Interrupted when koibill last closed. Retry to send again.' }
+        : provider),
+    }))
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return []
+    throw error
   }
 }
 

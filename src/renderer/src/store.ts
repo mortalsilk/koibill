@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 import type {
-  Annotation, AnnotationConversationLink, AnnotationDocument, PageMetadata, PdfSession,
+  AIComparisonExcerpt, AIComparisonRecord, AIProviderId, Annotation, AnnotationConversationLink, AnnotationDocument, AskAIProviderDeliveryState, PageMetadata, PdfSession,
   PdfFocusSettings, PdfTabDescriptor, ResearchTrayItem, ResearchWorkspace, ToolMode,
   ReflowViewSettings,
 } from '../../shared/types'
@@ -27,6 +27,7 @@ interface WorkspaceState {
   activeDocumentId: string | null
   tray: ResearchTrayItem[]
   question: string
+  comparisons: AIComparisonRecord[]
   tool: ToolMode
   highlightColor: string
   penColor: string
@@ -63,10 +64,16 @@ interface WorkspaceState {
   moveTrayItem: (id: string, direction: -1 | 1) => void
   clearTray: () => void
   setQuestion: (question: string) => void
+  addComparison: (comparison: AIComparisonRecord) => void
+  updateComparisonProvider: (id: string, provider: AIProviderId, state: AskAIProviderDeliveryState, message?: string, link?: AnnotationConversationLink) => void
+  addComparisonExcerpt: (id: string, excerpt: AIComparisonExcerpt) => void
+  renameComparison: (id: string, title: string) => void
+  removeComparisonExcerpt: (id: string, excerptId: string) => void
+  removeComparison: (id: string) => void
 }
 
 export const useWorkspaceStore = create<WorkspaceState>((set) => ({
-  documents: {}, order: [], activeDocumentId: null, tray: [], question: '',
+  documents: {}, order: [], activeDocumentId: null, tray: [], question: '', comparisons: [],
   tool: 'select', highlightColor: '#facc15', penColor: '#000000', penWidth: 2,
   selectedAnnotationId: null,
   restore: (workspace) => set({
@@ -75,6 +82,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
     activeDocumentId: workspace.activeDocumentId,
     tray: workspace.tray,
     question: workspace.question,
+    comparisons: workspace.comparisons ?? [],
     selectedAnnotationId: null,
   }),
   upsertSession: (session) => set((state) => {
@@ -175,6 +183,14 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
     const tray = [...state.tray]; const [item] = tray.splice(index, 1); tray.splice(target, 0, item); return { tray }
   }),
   clearTray: () => set({ tray: [] }), setQuestion: (question) => set({ question }),
+  addComparison: (comparison) => set((state) => ({ comparisons: [comparison, ...state.comparisons].slice(0, 100) })),
+  updateComparisonProvider: (id, provider, status, message, link) => set((state) => ({ comparisons: state.comparisons.map((comparison) => comparison.id === id ? {
+    ...comparison, modifiedAt: now(), providers: comparison.providers.map((item) => item.provider === provider ? { ...item, state: status, message, conversationLink: link ?? item.conversationLink } : item),
+  } : comparison) })),
+  addComparisonExcerpt: (id, excerpt) => set((state) => ({ comparisons: state.comparisons.map((comparison) => comparison.id === id ? { ...comparison, modifiedAt: now(), excerpts: [...comparison.excerpts, excerpt].slice(-100) } : comparison) })),
+  renameComparison: (id, title) => set((state) => ({ comparisons: state.comparisons.map((item) => item.id === id ? { ...item, title: title.slice(0, 200), modifiedAt: now() } : item) })),
+  removeComparisonExcerpt: (id, excerptId) => set((state) => ({ comparisons: state.comparisons.map((item) => item.id === id ? { ...item, excerpts: item.excerpts.filter((excerpt) => excerpt.id !== excerptId), modifiedAt: now() } : item) })),
+  removeComparison: (id) => set((state) => ({ comparisons: state.comparisons.filter((item) => item.id !== id) })),
 }))
 
 function emptyTab(descriptor: PdfTabDescriptor): PdfDocumentState {

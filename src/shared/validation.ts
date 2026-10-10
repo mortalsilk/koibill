@@ -1,5 +1,5 @@
-import type { Annotation, AnnotationDocument, AskAIRequest, BrowserBounds, BrowserCommand, GraphDocument, ResearchTrayItem, SemanticDocument, SemanticSourceSpan, WorkspaceUiState } from './types'
-import { detectAIProvider, isAIConversationUrl, isAIProviderId } from './ai-providers'
+import type { AIComparisonRecord, AskAIComparisonRequest, AskAIContextItem, Annotation, AnnotationDocument, AskAIRequest, BrowserBounds, BrowserCommand, GraphDocument, ResearchTrayItem, SemanticDocument, SemanticSourceSpan, WorkspaceUiState } from './types'
+import { detectAIProvider, isAIConversationUrl, isAIProviderId, isAIProviderUrl } from './ai-providers'
 
 export function isSafeWebUrl(value: string): boolean {
   try {
@@ -49,6 +49,8 @@ export function isAskAIRequest(value: unknown): value is AskAIRequest {
   if (typeof request.requestId !== 'string' || !request.requestId || !isAIProviderId(request.provider)
     || (request.mode !== 'draft' && request.mode !== 'send')) return false
   if (!Array.isArray(request.linkTargets) || request.linkTargets.length > 500 || !request.linkTargets.every(isAnnotationReference)) return false
+  if (request.kind === 'composed') return typeof request.prompt === 'string' && request.prompt.length > 0 && request.prompt.length <= 20_000
+    && typeof request.promptEdited === 'boolean' && Array.isArray(request.contexts) && request.contexts.length <= 500 && request.contexts.every(isAskAIContextItem)
   if (request.kind === 'selection') {
     return typeof request.text === 'string'
       && request.text.length > 0
@@ -66,6 +68,63 @@ export function isAskAIRequest(value: unknown): value is AskAIRequest {
     && request.items.length > 0
     && request.items.length <= 500
     && request.items.every(isResearchTrayItem)
+}
+
+export function isAskAIComparisonRequest(value: unknown): value is AskAIComparisonRequest {
+  if (!value || typeof value !== 'object') return false
+  const request = value as Record<string, unknown>
+  return typeof request.requestId === 'string' && Boolean(request.requestId)
+    && typeof request.comparisonId === 'string' && Boolean(request.comparisonId)
+    && Array.isArray(request.providers) && request.providers.length >= 2 && request.providers.length <= 5
+    && new Set(request.providers).size === request.providers.length && request.providers.every(isAIProviderId)
+    && typeof request.prompt === 'string' && request.prompt.length > 0 && request.prompt.length <= 20_000
+    && typeof request.promptEdited === 'boolean'
+    && Array.isArray(request.contexts) && request.contexts.length <= 500 && request.contexts.every(isAskAIContextItem)
+    && Array.isArray(request.linkTargets) && request.linkTargets.length <= 500 && request.linkTargets.every(isAnnotationReference)
+}
+
+export function isAskAIContextItem(value: unknown): value is AskAIContextItem {
+  if (!value || typeof value !== 'object') return false
+  const item = value as Record<string, unknown>
+  return typeof item.id === 'string' && typeof item.label === 'string' && item.label.length <= 200
+    && ['selection', 'nearby', 'annotation-note', 'page-note', 'document-note', 'research'].includes(String(item.kind))
+    && typeof item.text === 'string' && item.text.length > 0 && item.text.length <= 20_000 && typeof item.enabled === 'boolean'
+    && (item.documentId === undefined || typeof item.documentId === 'string')
+    && (item.sourceFingerprint === undefined || typeof item.sourceFingerprint === 'string')
+    && (item.documentName === undefined || typeof item.documentName === 'string')
+    && (item.pageNumber === undefined || (Number.isInteger(item.pageNumber) && Number(item.pageNumber) > 0))
+    && (item.endPageNumber === undefined || (item.pageNumber !== undefined && optionalPageRange(item.endPageNumber, Number(item.pageNumber))))
+    && optionalSourceSpans(item.sourceSpans)
+    && (item.annotationId === undefined || typeof item.annotationId === 'string')
+    && (item.researchItemId === undefined || typeof item.researchItemId === 'string')
+}
+
+export function isAIComparisonRecord(value: unknown): value is AIComparisonRecord {
+  if (!value || typeof value !== 'object') return false
+  const item = value as Record<string, unknown>
+  return typeof item.id === 'string' && typeof item.title === 'string' && item.title.length <= 200
+    && typeof item.prompt === 'string' && item.prompt.length > 0 && item.prompt.length <= 20_000
+    && typeof item.promptEdited === 'boolean' && typeof item.createdAt === 'string' && typeof item.modifiedAt === 'string'
+    && Array.isArray(item.contexts) && item.contexts.length <= 500 && item.contexts.every(isAskAIContextItem)
+    && Array.isArray(item.linkTargets) && item.linkTargets.length <= 500 && item.linkTargets.every(isAnnotationReference)
+    && Array.isArray(item.providers) && item.providers.length >= 2 && item.providers.length <= 5
+    && new Set(item.providers.map((entry) => entry && typeof entry === 'object' ? (entry as Record<string, unknown>).provider : undefined)).size === item.providers.length
+    && item.providers.every((entry) => {
+      if (!entry || typeof entry !== 'object') return false
+      const provider = entry as Record<string, unknown>
+      return isAIProviderId(provider.provider) && ['queued', 'loading', 'inserted', 'pending', 'linked', 'failed', 'expired', 'cancelled'].includes(String(provider.state))
+        && (provider.message === undefined || typeof provider.message === 'string')
+        && (provider.conversationLink === undefined || (isConversationLink(provider.conversationLink)
+          && detectAIProvider(String((provider.conversationLink as Record<string, unknown>).url))?.id === provider.provider))
+    })
+    && Array.isArray(item.excerpts) && item.excerpts.length <= 100 && item.excerpts.every((entry) => {
+      if (!entry || typeof entry !== 'object') return false
+      const excerpt = entry as Record<string, unknown>
+      return typeof excerpt.id === 'string' && isAIProviderId(excerpt.provider) && typeof excerpt.text === 'string' && excerpt.text.length > 0 && excerpt.text.length <= 20_000
+        && typeof excerpt.title === 'string' && excerpt.title.length <= 500 && typeof excerpt.createdAt === 'string'
+        && (excerpt.url === undefined || (typeof excerpt.url === 'string' && isAIProviderUrl(excerpt.url) && detectAIProvider(excerpt.url)?.id === excerpt.provider))
+        && (excerpt.browserTabId === undefined || typeof excerpt.browserTabId === 'string')
+    })
 }
 
 export function isBrowserCommand(value: unknown): value is BrowserCommand {
@@ -153,6 +212,7 @@ export function isWorkspaceUiState(value: unknown): value is WorkspaceUiState {
     && documentIds.every((id) => isPdfViewState((viewStates as Record<string, unknown>)[id]))
     && Array.isArray(state.tray) && state.tray.length <= 500 && state.tray.every(isResearchTrayItem)
     && typeof state.question === 'string' && state.question.length <= 20_000
+    && (state.comparisons === undefined || (Array.isArray(state.comparisons) && state.comparisons.length <= 100 && state.comparisons.every(isAIComparisonRecord)))
 }
 
 export function isGraphDocument(value: unknown): value is GraphDocument {

@@ -2,10 +2,10 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { BookOpenText, ChevronDown, ChevronUp, Ellipsis, Eraser, FileDown, Highlighter, Maximize2, Menu, MousePointer2, Pencil, Plus, Redo2, RotateCw, ScanText, Search, Settings2, Trash2, Type, Undo2, X, ZoomIn, ZoomOut } from 'lucide-react'
 import { getDocument, GlobalWorkerOptions, type PDFDocumentProxy, type PDFPageProxy } from 'pdfjs-dist'
 import workerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url'
-import type { AIProviderId, Annotation, AskAIRequest, PdfFocusSettings, PdfFocusUnit, PdfImportProgress, PdfSession, PdfViewState, ReflowTypographySettings, ReflowViewMode, ResearchTrayItem, SemanticDocument } from '../../../shared/types'
+import type { AIComparisonRecord, AIProviderId, Annotation, AskAIComposerSeed, AskAIRequest, PdfFocusSettings, PdfFocusUnit, PdfImportProgress, PdfSession, PdfViewState, ReflowTypographySettings, ReflowViewMode, ResearchTrayItem, SemanticDocument } from '../../../shared/types'
 import { AI_PROVIDERS } from '../../../shared/ai-providers'
-import { formatPrompt } from '../../../shared/prompt'
 import { useWorkspaceStore } from '../store'
+import { isPdfRenderCancellation } from '../pdf-render-lifecycle'
 import { getPdfSelectionPageRange, shouldRenderPdfPage, type PdfSelectionPageRange } from '../pdf-selection'
 import { PdfPage } from './PdfPage'
 import { AIProviderSelect } from './AIProviderSelect'
@@ -14,6 +14,7 @@ import { registerWorkspaceFlusher } from '../persistence'
 import { findReadingUnitAt, nearestReadingUnit, type PageReadingMap, type ReadingUnit } from '../pdf-reading-map'
 import { anchorScrollCorrection, normalizeWheelDelta, zoomForWheel, type WheelZoomAnchor } from '../pdf-wheel-zoom'
 import { Popover } from './ui/Popover'
+import { AskAIComposer } from './AskAIComposer'
 import 'pdfjs-dist/web/pdf_viewer.css'
 
 GlobalWorkerOptions.workerSrc = workerUrl
@@ -38,6 +39,7 @@ export function PdfWorkspace({ typography, onTypography }: { typography: ReflowT
   const wheelZoomInFlight = useRef(false)
   const saveTimers = useRef(new Map<string, number>())
   const savedVersions = useRef(new Map<string, string>())
+  const composerRequest = useRef(0)
   const [pdf, setPdf] = useState<PDFDocumentProxy | null>(null)
   const [sidebarOpen, setSidebarOpen] = useState(true)
   const [sidebarView, setSidebarView] = useState<SidebarView>('pages')
@@ -50,7 +52,9 @@ export function PdfWorkspace({ typography, onTypography }: { typography: ReflowT
   const [passwordRequest, setPasswordRequest] = useState<null | { submit: (password: string) => void; incorrect: boolean }>(null)
   const [pendingRequestId, setPendingRequestId] = useState<string | null>(null)
   const [pendingMessage, setPendingMessage] = useState('Waiting to link conversation…')
-  const [aiProvider, setAIProvider] = useState<AIProviderId>('chatgpt')
+  const [composerSeed, setComposerSeed] = useState<AskAIComposerSeed | null>(null)
+  const [researchSection, setResearchSection] = useState<'sources' | 'comparisons'>('sources')
+  const [activeComparisonId, setActiveComparisonId] = useState<string | null>(null)
   const [selectionPageRange, setSelectionPageRange] = useState<PdfSelectionPageRange | null>(null)
   const [importProgress, setImportProgress] = useState<PdfImportProgress | null>(null)
   const [activeReadingUnits, setActiveReadingUnits] = useState<Record<string, ReadingUnit | null>>({})
@@ -320,6 +324,24 @@ export function PdfWorkspace({ typography, onTypography }: { typography: ReflowT
     } finally { setBusy(false) }
   }, [restorePagePosition, store])
 
+  const openComposer = useCallback(async (seed: AskAIComposerSeed): Promise<void> => {
+    const request = ++composerRequest.current
+    const contexts = [...seed.contexts]
+    const source = contexts.find((item) => item.documentId && item.pageNumber)
+    const state = useWorkspaceStore.getState()
+    const tab = source?.documentId ? state.documents[source.documentId] : undefined
+    if (tab?.session && source?.pageNumber) {
+      const [pageNote, documentNote] = await Promise.all([
+        window.koibill.getPageNote(tab.session.id, source.pageNumber).catch(() => null),
+        window.koibill.getDocumentNote(tab.session.id).catch(() => null),
+      ])
+      if (request !== composerRequest.current) return
+      if (pageNote?.exists && pageNote.content.trim()) contexts.push({ id: crypto.randomUUID(), kind: 'page-note', label: `Page ${source.pageNumber} note`, text: pageNote.content.slice(0, 20_000), enabled: false, documentId: source.documentId, documentName: source.documentName, pageNumber: source.pageNumber })
+      if (documentNote?.exists && documentNote.content.trim()) contexts.push({ id: crypto.randomUUID(), kind: 'document-note', label: 'Document note', text: documentNote.content.slice(0, 20_000), enabled: false, documentId: source.documentId, documentName: source.documentName })
+    }
+    setComposerSeed({ ...seed, contexts })
+  }, [])
+
   useEffect(() => {
     let cancelled = false
     void window.koibill.restoreWorkspace().then((workspace) => {
@@ -329,14 +351,21 @@ export function PdfWorkspace({ typography, onTypography }: { typography: ReflowT
     })
     const removeTrayListener = window.koibill.onResearchTrayItem((item) => { store.addTrayItem(item); setSidebarOpen(true); setSidebarView('research') })
     const removeStatusListener = window.koibill.onAskAIStatus((status) => {
-      if (status.state === 'pending') { setPendingRequestId(status.requestId); setPendingMessage(status.message ?? 'Waiting to link conversation…') }
-      if (status.state !== 'pending') setPendingRequestId(null)
+      if (status.comparisonId && status.provider) store.updateComparisonProvider(status.comparisonId, status.provider, status.state, status.message, status.link)
+      if (!status.comparisonId && status.state === 'pending') { setPendingRequestId(status.requestId); setPendingMessage(status.message ?? 'Waiting to link conversation…') }
+      if (!status.comparisonId && status.state !== 'pending') setPendingRequestId(null)
       if (status.state === 'linked' && status.link) {
         status.linkTargets.forEach((target) => store.addConversationLink(target.documentId, target.annotationId, status.link!))
         setMessage('AI conversation linked to the source annotation.')
       } else if (status.state === 'cancelled' && status.message) setMessage(status.message)
     })
-    return () => { cancelled = true; removeTrayListener(); removeStatusListener() }
+    const removeComposeListener = window.koibill.onAskAICompose((seed) => { void openComposer(seed) })
+    const removeExcerptListener = window.koibill.onComparisonExcerpt((comparisonId, excerpt) => {
+      store.addComparisonExcerpt(comparisonId, excerpt)
+      setSidebarOpen(true); setSidebarView('research'); setResearchSection('comparisons'); setActiveComparisonId(comparisonId)
+      setMessage(`Saved ${AI_PROVIDERS.find((provider) => provider.id === excerpt.provider)?.name ?? 'AI'} answer excerpt.`)
+    })
+    return () => { cancelled = true; removeTrayListener(); removeStatusListener(); removeComposeListener(); removeExcerptListener() }
   }, [])
 
   useEffect(() => window.koibill.onPdfImportProgress((progress) => {
@@ -350,14 +379,15 @@ export function PdfWorkspace({ typography, onTypography }: { typography: ReflowT
       ? [{ sessionId: tab.session.id, document: tab.document }]
       : [])
     await Promise.all(entries.map((entry) => window.koibill.saveAnnotations(entry.sessionId, entry.document)))
-    await window.koibill.saveWorkspace({ documentIds: current.order, activeDocumentId: current.activeDocumentId, viewStates: workspaceViewStates(current), tray: current.tray, question: current.question })
+    await window.koibill.saveWorkspace({ documentIds: current.order, activeDocumentId: current.activeDocumentId, viewStates: workspaceViewStates(current), tray: current.tray, question: current.question, comparisons: current.comparisons })
   }), [])
 
   useEffect(() => {
     const unload = (): void => {
+      composerRequest.current += 1
       for (const cached of pdfCache.current.values()) void cached.cleanup()
       pdfCache.current.clear(); readingMaps.current.clear(); activeReadingUnitsRef.current = {}; pendingFocusStep.current = null
-      setActiveReadingUnits({}); setPdf(null)
+      setActiveReadingUnits({}); setPdf(null); setComposerSeed(null); setActiveComparisonId(null)
     }
     window.addEventListener('koibill:workspace-unload', unload)
     return () => window.removeEventListener('koibill:workspace-unload', unload)
@@ -387,9 +417,9 @@ export function PdfWorkspace({ typography, onTypography }: { typography: ReflowT
   }, [store.documents])
 
   useEffect(() => {
-    const timeout = window.setTimeout(() => void window.koibill.saveWorkspace({ documentIds: store.order, activeDocumentId: store.activeDocumentId, viewStates: workspaceViewStates(store), tray: store.tray, question: store.question }), 250)
+    const timeout = window.setTimeout(() => void window.koibill.saveWorkspace({ documentIds: store.order, activeDocumentId: store.activeDocumentId, viewStates: workspaceViewStates(store), tray: store.tray, question: store.question, comparisons: store.comparisons }), 250)
     return () => window.clearTimeout(timeout)
-  }, [store.order, store.activeDocumentId, store.tray, store.question, viewStateSignature])
+  }, [store.order, store.activeDocumentId, store.tray, store.question, store.comparisons, viewStateSignature])
 
   useEffect(() => {
     const keydown = (event: KeyboardEvent): void => {
@@ -575,14 +605,32 @@ export function PdfWorkspace({ typography, onTypography }: { typography: ReflowT
     if (!active?.session) return; const text = annotationText(annotation); if (!text) return
     store.addTrayItem({ id: crypto.randomUUID(), documentId: active.session.documentId, sourceFingerprint: active.session.fingerprint, documentName: active.session.name, pageNumber: annotation.pageIndex + 1, text, annotationId: annotation.id, createdAt: new Date().toISOString() }); setSidebarView('research')
   }
-  const askAnnotation = (annotation: Annotation, mode: 'draft' | 'send'): void => {
+  const askAnnotation = (annotation: Annotation): void => {
     if (!active?.session) return; const text = annotationText(annotation); if (!text) return
-    const request: AskAIRequest = { kind: 'selection', provider: aiProvider, requestId: crypto.randomUUID(), mode, text, documentName: active.session.name, pageNumber: annotation.pageIndex + 1, linkTargets: [{ documentId: active.session.documentId, annotationId: annotation.id }] }
-    void window.koibill.askAI(request)
+    const contexts: AskAIComposerSeed['contexts'] = [{ id: crypto.randomUUID(), kind: 'selection', label: annotation.type === 'highlight' ? 'Highlighted passage' : 'Ink note', text, enabled: true, documentId: active.session.documentId, sourceFingerprint: active.session.fingerprint, documentName: active.session.name, pageNumber: annotation.pageIndex + 1, annotationId: annotation.id }]
+    if (annotation.note?.trim() && annotation.note.trim() !== text) contexts.push({ id: crypto.randomUUID(), kind: 'annotation-note', label: 'Annotation note', text: annotation.note.trim(), enabled: true, documentId: active.session.documentId, documentName: active.session.name, pageNumber: annotation.pageIndex + 1, annotationId: annotation.id })
+    void openComposer({ instruction: 'Please help me understand and evaluate this annotation.', contexts, linkTargets: [{ documentId: active.session.documentId, annotationId: annotation.id }] })
   }
-  const trayRequest = (mode: 'draft' | 'send'): AskAIRequest => ({ kind: 'research', provider: aiProvider, requestId: crypto.randomUUID(), mode, question: store.question, items: store.tray, linkTargets: store.tray.flatMap((item) => item.annotationId ? [{ documentId: item.documentId, annotationId: item.annotationId }] : []) })
-  const trayLength = store.tray.length ? formatPrompt(trayRequest('draft')).length : 0
-  const askTray = (mode: 'draft' | 'send'): void => { const request = trayRequest(mode); if (formatPrompt(request).length <= 20_000) void window.koibill.askAI(request) }
+  const askTray = (): void => {
+    if (!store.tray.length) return
+    const contexts = store.tray.map((item, index) => ({ id: crypto.randomUUID(), kind: 'research' as const, label: `Research source ${index + 1}`, text: item.text, enabled: true, documentId: item.documentId, sourceFingerprint: item.sourceFingerprint, documentName: item.documentName, pageNumber: item.pageNumber, endPageNumber: item.endPageNumber, sourceSpans: item.sourceSpans, annotationId: item.annotationId, researchItemId: item.id }))
+    void openComposer({ instruction: store.question.trim() || 'Compare and synthesize these passages. Cite the numbered sources in your answer.', contexts, linkTargets: store.tray.flatMap((item) => item.annotationId ? [{ documentId: item.documentId, annotationId: item.annotationId }] : []) })
+  }
+
+  const sendComposed = (provider: AIProviderId, mode: 'draft' | 'send', prompt: string, contexts: AskAIComposerSeed['contexts'], promptEdited: boolean): void => {
+    if (!composerSeed) return
+    const request: AskAIRequest = { kind: 'composed', provider, requestId: crypto.randomUUID(), mode, prompt, contexts, promptEdited, linkTargets: composerSeed.linkTargets }
+    setComposerSeed(null); void window.koibill.askAI(request)
+  }
+  const compareComposed = (providers: AIProviderId[], prompt: string, contexts: AskAIComposerSeed['contexts'], promptEdited: boolean): void => {
+    if (!composerSeed) return
+    const id = crypto.randomUUID(); const now = new Date().toISOString()
+    const title = (prompt.split('\n').find((line) => line.trim()) ?? 'AI comparison').trim().slice(0, 80)
+    const comparison: AIComparisonRecord = { id, title, prompt, promptEdited, contexts, linkTargets: composerSeed.linkTargets, providers: providers.map((provider) => ({ provider, state: 'queued' })), excerpts: [], createdAt: now, modifiedAt: now }
+    store.addComparison(comparison); setActiveComparisonId(id); window.koibill.setActiveComparison(id, providers)
+    setSidebarOpen(true); setSidebarView('research'); setResearchSection('comparisons'); setComposerSeed(null)
+    void window.koibill.compareAI({ requestId: crypto.randomUUID(), comparisonId: id, providers, prompt, contexts, promptEdited, linkTargets: comparison.linkTargets })
+  }
 
   return <section ref={paneRef} className="pdf-pane" aria-label="PDF reader" tabIndex={-1} onPointerDownCapture={(event) => {
     if (!isInteractiveTarget(event.target)) paneRef.current?.focus({ preventScroll: true })
@@ -613,10 +661,19 @@ export function PdfWorkspace({ typography, onTypography }: { typography: ReflowT
       <span className="toolbar-divider"/><button className="icon-button" disabled={!active?.past.length} onClick={() => activeId && store.undo(activeId)} title="Undo"><Undo2 size={16}/></button><button className="icon-button" disabled={!active?.future.length} onClick={() => activeId && store.redo(activeId)} title="Redo"><Redo2 size={16}/></button><button className="context-done" onClick={() => store.setTool('select')}>Done</button>
     </div>}
     <div className="reader-body">
-      {sidebarOpen && <aside className="thumbnail-sidebar workspace-sidebar"><div className="sidebar-tabs">{(['pages','annotations','research'] as SidebarView[]).map((view) => <button key={view} className={sidebarView === view ? 'active' : ''} onClick={() => setSidebarView(view)}>{view[0].toUpperCase() + view.slice(1)}</button>)}</div>
+      {sidebarOpen && <aside className="thumbnail-sidebar workspace-sidebar"><div className="sidebar-tabs">{([{ id: 'pages', label: 'Pages' }, { id: 'annotations', label: 'Marks', accessible: 'Annotations' }, { id: 'research', label: 'Research' }] as Array<{ id: SidebarView; label: string; accessible?: string }>).map(({ id, label, accessible }) => <button key={id} title={accessible ?? label} aria-label={accessible ?? label} aria-pressed={sidebarView === id} className={sidebarView === id ? 'active' : ''} onClick={() => setSidebarView(id)}>{label}</button>)}</div>
         {sidebarView === 'pages' && (pdf ? Array.from({ length: pdf.numPages }, (_, index) => <Thumbnail key={index + 1} pageNumber={index + 1} getPage={getPage} active={active?.currentPage === index + 1} onClick={() => goToPage(index + 1)}/>) : <p className="sidebar-empty">No PDF selected</p>)}
-        {sidebarView === 'annotations' && <AnnotationSidebar annotations={annotations} selectedId={store.selectedAnnotationId} onSelect={(annotation) => { store.selectAnnotation(annotation.id); goToPage(annotation.pageIndex + 1); const link = annotation.conversationLinks?.at(-1); if (link) void window.koibill.browserCommand({ type: 'activate-or-open', tabId: link.browserTabId, url: link.url }) }}/>} 
-        {sidebarView === 'research' && <ResearchTray items={store.tray} question={store.question} promptLength={trayLength} provider={aiProvider} onProvider={setAIProvider} onQuestion={store.setQuestion} onNavigate={navigateToItem} onMove={store.moveTrayItem} onRemove={store.removeTrayItem} onClear={store.clearTray} onAsk={askTray}/>} 
+        {sidebarView === 'annotations' && <AnnotationSidebar annotations={annotations} selectedId={store.selectedAnnotationId} onSelect={(annotation) => { store.selectAnnotation(annotation.id); goToPage(annotation.pageIndex + 1); const link = annotation.conversationLinks?.at(-1); if (link) void window.koibill.browserCommand({ type: 'activate-or-open', tabId: link.browserTabId, url: link.url }) }}/>}
+        {sidebarView === 'research' && <ResearchSidebar
+          section={researchSection} onSection={setResearchSection} items={store.tray} question={store.question}
+          comparisons={store.comparisons} activeComparisonId={activeComparisonId}
+          onActivateComparison={(comparison) => { setActiveComparisonId(comparison.id); window.koibill.setActiveComparison(comparison.id, comparison.providers.map((item) => item.provider)) }}
+          onClearActiveComparison={() => { setActiveComparisonId(null); window.koibill.setActiveComparison(null, []) }}
+          onQuestion={store.setQuestion} onNavigate={navigateToItem} onMove={store.moveTrayItem}
+          onRemove={store.removeTrayItem} onClear={store.clearTray} onAsk={askTray} onRename={store.renameComparison}
+          onRemoveComparison={(id) => { store.removeComparison(id); if (activeComparisonId === id) { setActiveComparisonId(null); window.koibill.setActiveComparison(null, []) } }}
+          onRemoveExcerpt={store.removeComparisonExcerpt}
+        />}
       </aside>}
       <div className={`pdf-content-layout mode-${active?.reflow.mode ?? 'original'} ${reflowDragging ? 'resizing' : ''}`} style={active?.reflow.mode === 'split' ? { gridTemplateColumns: `minmax(0, ${active.reflow.splitRatio}fr) 6px minmax(0, ${1 - active.reflow.splitRatio}fr)` } : undefined}>
         <div ref={viewerRef} className="pdf-viewer original-surface">{active?.status === 'missing' ? <div className="empty-state"><h1>Workspace PDF missing</h1><p>{active.descriptor.name} is missing from this workspace folder.</p></div> : pdf && active?.session && active.document ? Array.from({ length: pdf.numPages }, (_, index) => <PdfPage key={`${activeId}-${index + 1}`} pageNumber={index + 1} pageMetadata={active.document!.pages[index]} shouldRender={active.reflow.mode !== 'reflow' && shouldRenderPdfPage(index + 1, active.currentPage, active.zoom, selectionPageRange)} getPage={getPage} scale={active.zoom} rotation={active.rotation} annotations={annotations} tool={store.tool} highlightColor={store.highlightColor} penColor={store.penColor} penWidth={store.penWidth} documentId={active.session!.documentId} sourceFingerprint={active.session!.fingerprint} documentName={active.session!.name} selectedAnnotationId={store.selectedAnnotationId} focusEnabled={active.focus.enabled} surroundingVisibility={active.focus.surroundingVisibility} focusMagnification={active.focus.magnification ?? 1.25} selectionActive={selectionPageRange !== null} activeReadingUnit={activeReadingUnits[active.session!.documentId] ?? null} onReadingMap={registerReadingMap} onFocusAt={focusAt} onAdd={(annotation) => store.addAnnotation(active.session!.documentId, annotation)} onRemove={(id) => store.removeAnnotation(active.session!.documentId, id)} onSelectAnnotation={(id) => { store.selectAnnotation(id); if (id) setSidebarView('annotations') }}/>) : <div className="empty-state"><div className="empty-mark">K</div><h1>Read, mark, ask.</h1><p>{message}</p><button className="primary-button" onClick={openPdf}>Import PDFs</button></div>}</div>
@@ -641,11 +698,20 @@ export function PdfWorkspace({ typography, onTypography }: { typography: ReflowT
         />}
       </div>
     </div>
-    {selectedAnnotation && activeId && <AnnotationDetail annotation={selectedAnnotation} provider={aiProvider} onProvider={setAIProvider} onClose={() => store.selectAnnotation(null)} onNote={(note) => store.updateAnnotationNote(activeId, selectedAnnotation.id, note)} onTray={() => addAnnotationToTray(selectedAnnotation)} onAsk={(mode) => askAnnotation(selectedAnnotation, mode)} onOpen={(link) => void window.koibill.browserCommand({ type: 'activate-or-open', tabId: link.browserTabId, url: link.url })} onRemoveLink={(linkId) => store.removeConversationLink(activeId, selectedAnnotation.id, linkId)}/>} 
+    {selectedAnnotation && activeId && <AnnotationDetail
+      annotation={selectedAnnotation} onClose={() => store.selectAnnotation(null)}
+      onNote={(note) => store.updateAnnotationNote(activeId, selectedAnnotation.id, note)}
+      onTray={() => addAnnotationToTray(selectedAnnotation)} onAsk={() => askAnnotation(selectedAnnotation)}
+      onOpen={(link) => void window.koibill.browserCommand({ type: 'activate-or-open', tabId: link.browserTabId, url: link.url })}
+      onRemoveLink={(linkId) => store.removeConversationLink(activeId, selectedAnnotation.id, linkId)}
+    />}
+    {composerSeed && <AskAIComposer key={composerSeed.contexts.map((item) => item.id).join(':')}
+      seed={composerSeed} onClose={() => setComposerSeed(null)} onSingle={sendComposed} onCompare={compareComposed}
+    />}
     {pendingRequestId && <div className="pending-link">{pendingMessage} <button onClick={() => { window.koibill.cancelAskAI(pendingRequestId); setPendingRequestId(null) }}>Cancel</button></div>}
     {busy && <div className="status-pill">Working…</div>}{message && pdf && <button className="status-message" onClick={() => setMessage('')}>{message}</button>}
     {active?.fingerprintMismatch && <div className="modal-backdrop"><div className="modal"><h2>The PDF has changed</h2><p>The saved annotations belong to an earlier version.</p><div className="modal-actions"><button onClick={() => activeId && store.acceptSourceFingerprint(activeId)}>Keep annotations</button><button className="primary-button" onClick={() => activeId && store.clearAnnotations(activeId)}>Start fresh</button></div></div></div>}
-    {passwordRequest && <PasswordDialog incorrect={passwordRequest.incorrect} onSubmit={passwordRequest.submit} onCancel={() => setPasswordRequest(null)}/>} 
+    {passwordRequest && <PasswordDialog incorrect={passwordRequest.incorrect} onSubmit={passwordRequest.submit} onCancel={() => setPasswordRequest(null)}/>}
     {importProgress && <div className="import-overlay" role="dialog" aria-modal="true" aria-label="Importing PDFs" onKeyDown={(event) => { if (event.key === 'Tab') { event.preventDefault(); event.currentTarget.querySelector('button')?.focus() } }}><div className="import-dialog"><strong>{importProgress.state === 'finalizing' ? 'Finalizing import…' : importProgress.state === 'error' ? 'Import failed' : 'Copying PDFs…'}</strong><p>{importProgress.fileName || importProgress.message}</p><progress max={Math.max(1, importProgress.totalBytesExpected)} value={importProgress.totalBytes}/><span>{importProgress.fileCount ? `${Math.max(1, importProgress.fileIndex)} of ${importProgress.fileCount} · ${Math.round(importProgress.totalBytes / Math.max(1, importProgress.totalBytesExpected) * 100)}%` : ''}</span>{(importProgress.state === 'copying' || importProgress.state === 'finalizing') && <button autoFocus onClick={() => window.koibill.cancelPdfImport(importProgress.operationId)}>Cancel</button>}{importProgress.state === 'error' && <button autoFocus onClick={() => setImportProgress(null)}>Close</button>}</div></div>}
   </section>
 }
@@ -715,19 +781,52 @@ function AnnotationSidebar({ annotations, selectedId, onSelect }: { annotations:
   return <div className="annotation-list">{pages.length ? pages.map((pageIndex) => <section className="annotation-page-group" key={pageIndex}><h3>Page {pageIndex + 1}</h3>{annotations.filter((annotation) => annotation.pageIndex === pageIndex).map((annotation) => <button key={annotation.id} className={selectedId === annotation.id ? 'active' : ''} onClick={() => onSelect(annotation)}><span>{annotation.type === 'highlight' ? 'Highlight' : 'Ink note'}</span><small>{annotation.type === 'highlight' ? annotation.selectedText || annotation.note || 'No captured text' : annotation.note || 'Add a note to this stroke'}</small>{annotation.conversationLinks?.length ? <em>{annotation.conversationLinks.length} linked conversation{annotation.conversationLinks.length === 1 ? '' : 's'}</em> : null}</button>)}</section>) : <p className="sidebar-empty">No annotations yet</p>}</div>
 }
 
-function ResearchTray({ items, question, promptLength, provider, onProvider, onQuestion, onNavigate, onMove, onRemove, onClear, onAsk }: { items: ResearchTrayItem[]; question: string; promptLength: number; provider: AIProviderId; onProvider: (provider: AIProviderId) => void; onQuestion: (value: string) => void; onNavigate: (item: ResearchTrayItem) => void; onMove: (id: string, direction: -1 | 1) => void; onRemove: (id: string) => void; onClear: () => void; onAsk: (mode: 'draft' | 'send') => void }): React.JSX.Element {
-  const invalid = !items.length || promptLength > 20_000
-  return <div className="research-tray"><textarea aria-label="Research question or instructions" placeholder="Question or instructions (optional)" value={question} onChange={(event) => onQuestion(event.target.value)}/>{items.map((item, index) => <article key={item.id} draggable onDragStart={(event) => event.dataTransfer.setData('text/koibill-tray-item', item.id)} onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); const source = event.dataTransfer.getData('text/koibill-tray-item'); let from = items.findIndex((entry) => entry.id === source); while (from >= 0 && from !== index) { const direction = from < index ? 1 : -1; onMove(source, direction); from += direction } }}><button className="tray-source" onClick={() => onNavigate(item)}><strong>[{index + 1}] {item.documentName}</strong><span>Page {item.pageNumber}</span><p>{item.text}</p></button><div><button aria-label={`Move source ${index + 1} up`} disabled={index === 0} onClick={() => onMove(item.id, -1)}><ChevronUp size={13}/></button><button aria-label={`Move source ${index + 1} down`} disabled={index === items.length - 1} onClick={() => onMove(item.id, 1)}><ChevronDown size={13}/></button><button aria-label={`Remove source ${index + 1}`} onClick={() => onRemove(item.id)}><Trash2 size={13}/></button></div></article>)}<div className={`prompt-count ${promptLength > 20_000 ? 'error' : ''}`}>{promptLength.toLocaleString()} / 20,000</div><AIProviderSelect value={provider} onChange={onProvider}/><div className="tray-actions"><button disabled={invalid} onClick={() => onAsk('draft')}>Insert draft</button><button className="primary-button" disabled={invalid} onClick={() => onAsk('send')}>Send now</button></div>{items.length > 0 && <button className="clear-tray" onClick={() => { if (window.confirm('Clear the research tray?')) onClear() }}>Clear tray</button>}</div>
+function ResearchSidebar(props: { section: 'sources' | 'comparisons'; onSection: (section: 'sources' | 'comparisons') => void; items: ResearchTrayItem[]; question: string; comparisons: AIComparisonRecord[]; activeComparisonId: string | null; onActivateComparison: (comparison: AIComparisonRecord) => void; onClearActiveComparison: () => void; onQuestion: (value: string) => void; onNavigate: (item: ResearchTrayItem) => void; onMove: (id: string, direction: -1 | 1) => void; onRemove: (id: string) => void; onClear: () => void; onAsk: () => void; onRename: (id: string, title: string) => void; onRemoveComparison: (id: string) => void; onRemoveExcerpt: (id: string, excerptId: string) => void }): React.JSX.Element {
+  return <div className="research-sidebar"><div className="research-sections" role="tablist"><button role="tab" aria-selected={props.section === 'sources'} className={props.section === 'sources' ? 'active' : ''} onClick={() => props.onSection('sources')}>Sources</button><button role="tab" aria-selected={props.section === 'comparisons'} className={props.section === 'comparisons' ? 'active' : ''} onClick={() => props.onSection('comparisons')}>Comparisons <span>{props.comparisons.length}</span></button></div>{props.section === 'sources' ? <ResearchTray {...props}/> : <ComparisonList {...props}/>}</div>
 }
 
-function AnnotationDetail({ annotation, provider, onProvider, onClose, onNote, onTray, onAsk, onOpen, onRemoveLink }: { annotation: Annotation; provider: AIProviderId; onProvider: (provider: AIProviderId) => void; onClose: () => void; onNote: (note: string) => void; onTray: () => void; onAsk: (mode: 'draft' | 'send') => void; onOpen: (link: NonNullable<Annotation['conversationLinks']>[number]) => void; onRemoveLink: (id: string) => void }): React.JSX.Element {
+function ResearchTray({ items, question, onQuestion, onNavigate, onMove, onRemove, onClear, onAsk }: { items: ResearchTrayItem[]; question: string; onQuestion: (value: string) => void; onNavigate: (item: ResearchTrayItem) => void; onMove: (id: string, direction: -1 | 1) => void; onRemove: (id: string) => void; onClear: () => void; onAsk: () => void }): React.JSX.Element {
+  return <div className="research-tray"><textarea aria-label="Research question or instructions" placeholder="Question or instructions (optional)" value={question} onChange={(event) => onQuestion(event.target.value)}/>{items.map((item, index) => <article key={item.id} draggable onDragStart={(event) => event.dataTransfer.setData('text/koibill-tray-item', item.id)} onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); const source = event.dataTransfer.getData('text/koibill-tray-item'); let from = items.findIndex((entry) => entry.id === source); while (from >= 0 && from !== index) { const direction = from < index ? 1 : -1; onMove(source, direction); from += direction } }}><button className="tray-source" onClick={() => onNavigate(item)}><strong>[{index + 1}] {item.documentName}</strong><span>Page {item.pageNumber}</span><p>{item.text}</p></button><div><button aria-label={`Move source ${index + 1} up`} disabled={index === 0} onClick={() => onMove(item.id, -1)}><ChevronUp size={13}/></button><button aria-label={`Move source ${index + 1} down`} disabled={index === items.length - 1} onClick={() => onMove(item.id, 1)}><ChevronDown size={13}/></button><button aria-label={`Remove source ${index + 1}`} onClick={() => onRemove(item.id)}><Trash2 size={13}/></button></div></article>)}<div className="tray-actions"><button className="primary-button" disabled={!items.length} onClick={onAsk}>Ask AI…</button></div>{items.length > 0 && <button className="clear-tray" onClick={() => { if (window.confirm('Clear the research tray?')) onClear() }}>Clear tray</button>}</div>
+}
+
+function ComparisonList({ comparisons, activeComparisonId, onActivateComparison, onClearActiveComparison, onRename, onRemoveComparison, onRemoveExcerpt }: { comparisons: AIComparisonRecord[]; activeComparisonId: string | null; onActivateComparison: (comparison: AIComparisonRecord) => void; onClearActiveComparison: () => void; onRename: (id: string, title: string) => void; onRemoveComparison: (id: string) => void; onRemoveExcerpt: (id: string, excerptId: string) => void }): React.JSX.Element {
+  const active = comparisons.find((item) => item.id === activeComparisonId)
+  if (!active) return <div className="comparison-list">{comparisons.length ? comparisons.map((comparison) => {
+    const complete = comparison.providers.filter((item) => ['inserted', 'pending', 'linked'].includes(item.state)).length
+    return <button key={comparison.id} onClick={() => onActivateComparison(comparison)}><strong>{comparison.title || 'Untitled comparison'}</strong><small>{comparison.providers.map((item) => AI_PROVIDERS.find((provider) => provider.id === item.provider)?.name).join(', ')}</small><span>{complete}/{comparison.providers.length} delivered · {comparison.excerpts.length} excerpt{comparison.excerpts.length === 1 ? '' : 's'}</span></button>
+  }) : <p className="sidebar-empty">No provider comparisons yet. Open Ask AI and choose Compare providers.</p>}</div>
+
+  return <div className="comparison-detail">
+    <button className="back-button" onClick={onClearActiveComparison}>← All comparisons</button>
+    <input aria-label="Comparison title" value={active.title} maxLength={200} placeholder="Untitled comparison" onChange={(event) => onRename(active.id, event.target.value)}/>
+    <small>{new Date(active.createdAt).toLocaleString()}</small>
+    <p className="comparison-capture-hint">Response capture is active. Select text in one of these provider tabs, right-click, and choose “Save selection to active comparison.”</p>
+    <details><summary>Prompt</summary><pre>{active.prompt}</pre><button onClick={() => void window.koibill.copyText(active.prompt)}>Copy prompt</button></details>
+    <section><h3>Providers</h3>{active.providers.map((result) => {
+      const provider = AI_PROVIDERS.find((item) => item.id === result.provider)!
+      return <article className="comparison-provider" key={result.provider}>
+        <header><strong>{provider.name}</strong><span data-state={result.state}>{providerStateLabel(result.state)}</span></header>
+        {result.message && <small role={result.state === 'failed' ? 'alert' : undefined}>{result.message}</small>}
+        <div>{result.conversationLink && <button onClick={() => void window.koibill.browserCommand({ type: 'activate-or-open', tabId: result.conversationLink?.browserTabId, url: result.conversationLink!.url })}>Open conversation</button>}{['failed', 'expired', 'cancelled'].includes(result.state) && <button onClick={() => void window.koibill.askAI({ kind: 'composed', requestId: crypto.randomUUID(), comparisonId: active.id, provider: result.provider, mode: 'send', prompt: active.prompt, contexts: active.contexts, promptEdited: active.promptEdited, linkTargets: active.linkTargets })}>Retry</button>}<button onClick={() => void window.koibill.browserCommand({ type: 'external-url', url: provider.homeUrl })}>Open externally</button></div>
+      </article>
+    })}</section>
+    <section><h3>Saved answer excerpts</h3>{active.excerpts.length ? active.excerpts.map((excerpt) => <article className="comparison-excerpt" key={excerpt.id}><header><strong>{AI_PROVIDERS.find((item) => item.id === excerpt.provider)?.name}</strong><button aria-label="Remove saved excerpt" onClick={() => onRemoveExcerpt(active.id, excerpt.id)}><X size={12}/></button></header><p>{excerpt.text}</p>{excerpt.url && <button onClick={() => void window.koibill.browserCommand({ type: 'activate-or-open', tabId: excerpt.browserTabId, url: excerpt.url! })}>Open source</button>}</article>) : <p className="sidebar-empty">No excerpts saved yet.</p>}</section>
+    <button className="danger-button" onClick={() => { if (window.confirm('Delete this comparison?')) onRemoveComparison(active.id) }}>Delete comparison</button>
+  </div>
+}
+
+function providerStateLabel(state: AIComparisonRecord['providers'][number]['state']): string {
+  return ({ queued: 'Queued', loading: 'Opening', inserted: 'Delivered', pending: 'Link pending', linked: 'Linked', failed: 'Needs attention', expired: 'Expired', cancelled: 'Stopped' } as const)[state]
+}
+
+function AnnotationDetail({ annotation, onClose, onNote, onTray, onAsk, onOpen, onRemoveLink }: { annotation: Annotation; onClose: () => void; onNote: (note: string) => void; onTray: () => void; onAsk: () => void; onOpen: (link: NonNullable<Annotation['conversationLinks']>[number]) => void; onRemoveLink: (id: string) => void }): React.JSX.Element {
   const text = annotation.type === 'highlight' ? annotation.selectedText || annotation.note : annotation.note
-  return <aside className="annotation-detail"><header><strong>{annotation.type === 'highlight' ? 'Highlight' : 'Ink'} · page {annotation.pageIndex + 1}</strong><button aria-label="Close annotation details" onClick={onClose}><X size={14}/></button></header>{annotation.type === 'highlight' && annotation.selectedText && <blockquote>{annotation.selectedText}</blockquote>}<label>Note<textarea value={annotation.note ?? ''} onChange={(event) => onNote(event.target.value.slice(0, 20_000))}/></label><AIProviderSelect value={provider} onChange={onProvider}/><div className="detail-actions"><button disabled={!text?.trim()} onClick={onTray}>Add to tray</button><button disabled={!text?.trim()} onClick={() => onAsk('draft')}>Insert draft</button><button disabled={!text?.trim()} onClick={() => onAsk('send')}>Send now</button></div>{annotation.conversationLinks?.map((link) => <div className="conversation-link" key={link.id}><button onClick={() => onOpen(link)}>{AI_PROVIDERS.find((item) => item.id === link.provider)?.name}: {link.title}</button><button aria-label={`Remove ${link.title} link`} onClick={() => onRemoveLink(link.id)}><X size={12}/></button></div>)}</aside>
+  return <aside className="annotation-detail"><header><strong>{annotation.type === 'highlight' ? 'Highlight' : 'Ink'} · page {annotation.pageIndex + 1}</strong><button aria-label="Close annotation details" onClick={onClose}><X size={14}/></button></header>{annotation.type === 'highlight' && annotation.selectedText && <blockquote>{annotation.selectedText}</blockquote>}<label>Note<textarea value={annotation.note ?? ''} onChange={(event) => onNote(event.target.value.slice(0, 20_000))}/></label><div className="detail-actions"><button disabled={!text?.trim()} onClick={onTray}>Add to tray</button><button disabled={!text?.trim()} onClick={onAsk}>Ask AI…</button></div>{annotation.conversationLinks?.map((link) => <div className="conversation-link" key={link.id}><button onClick={() => onOpen(link)}>{AI_PROVIDERS.find((item) => item.id === link.provider)?.name}: {link.title}</button><button aria-label={`Remove ${link.title} link`} onClick={() => onRemoveLink(link.id)}><X size={12}/></button></div>)}</aside>
 }
 
 function Thumbnail({ pageNumber, getPage, active, onClick }: { pageNumber: number; getPage: (page: number) => Promise<PDFPageProxy>; active: boolean; onClick: () => void }): React.JSX.Element {
   const canvasRef = useRef<HTMLCanvasElement>(null); const hostRef = useRef<HTMLButtonElement>(null)
-  useEffect(() => { const host = hostRef.current; if (!host) return; let rendered = false; let task: ReturnType<PDFPageProxy['render']> | undefined; const observer = new IntersectionObserver((entries) => { if (!entries[0]?.isIntersecting || rendered) return; rendered = true; void getPage(pageNumber).then((page) => { const viewport = page.getViewport({ scale: .18 }); const canvas = canvasRef.current; if (!canvas) return; canvas.width = viewport.width; canvas.height = viewport.height; const context = canvas.getContext('2d'); if (context) task = page.render({ canvas, canvasContext: context, viewport }) }) }, { rootMargin: '300px' }); observer.observe(host); return () => { observer.disconnect(); task?.cancel() } }, [getPage, pageNumber])
+  useEffect(() => { const host = hostRef.current; if (!host) return; let rendered = false; let cancelled = false; let task: ReturnType<PDFPageProxy['render']> | undefined; const observer = new IntersectionObserver((entries) => { if (!entries[0]?.isIntersecting || rendered) return; rendered = true; void getPage(pageNumber).then((page) => { if (cancelled) return; const viewport = page.getViewport({ scale: .18 }); const canvas = canvasRef.current; if (!canvas) return; canvas.width = viewport.width; canvas.height = viewport.height; const context = canvas.getContext('2d'); if (context) { task = page.render({ canvas, canvasContext: context, viewport }); void task.promise.catch((error) => { if (!cancelled && !isPdfRenderCancellation(error)) console.warn(`Unable to render thumbnail ${pageNumber}`, error) }) } }).catch((error) => { if (!cancelled) console.warn(`Unable to load thumbnail ${pageNumber}`, error) }) }, { rootMargin: '300px' }); observer.observe(host); return () => { cancelled = true; observer.disconnect(); task?.cancel() } }, [getPage, pageNumber])
   return <button ref={hostRef} className={`thumbnail ${active ? 'active' : ''}`} onClick={onClick}><canvas ref={canvasRef}/><span>{pageNumber}</span></button>
 }
 function PasswordDialog({ incorrect, onSubmit, onCancel }: { incorrect: boolean; onSubmit: (password: string) => void; onCancel: () => void }): React.JSX.Element { const [password, setPassword] = useState(''); return <div className="modal-backdrop"><form className="modal" onSubmit={(event) => { event.preventDefault(); onSubmit(password) }}><h2>Protected PDF</h2><p>{incorrect ? 'That password was not accepted. Try again.' : 'Enter the document password to continue.'}</p><input type="password" autoFocus value={password} onChange={(event) => setPassword(event.target.value)}/><div className="modal-actions"><button type="button" onClick={onCancel}>Cancel</button><button className="primary-button" type="submit">Unlock</button></div></form></div> }

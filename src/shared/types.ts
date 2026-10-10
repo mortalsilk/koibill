@@ -198,6 +198,59 @@ export interface ResearchTrayItem {
   createdAt: string
 }
 
+export type AskAIContextKind = 'selection' | 'nearby' | 'annotation-note' | 'page-note' | 'document-note' | 'research'
+export interface AskAIContextItem {
+  id: string
+  kind: AskAIContextKind
+  label: string
+  text: string
+  enabled: boolean
+  documentId?: string
+  sourceFingerprint?: string
+  documentName?: string
+  pageNumber?: number
+  endPageNumber?: number
+  sourceSpans?: SemanticSourceSpan[]
+  annotationId?: string
+  researchItemId?: string
+}
+
+export interface AskAIComposerSeed {
+  instruction: string
+  contexts: AskAIContextItem[]
+  linkTargets: AnnotationReference[]
+}
+
+export type AskAIProviderDeliveryState = 'queued' | 'loading' | 'inserted' | 'pending' | 'linked' | 'failed' | 'expired' | 'cancelled'
+export interface AIComparisonExcerpt {
+  id: string
+  provider: AIProviderId
+  text: string
+  title: string
+  url?: string
+  browserTabId?: string
+  createdAt: string
+}
+export interface AIComparisonProviderResult {
+  provider: AIProviderId
+  state: AskAIProviderDeliveryState
+  message?: string
+  conversationLink?: AnnotationConversationLink
+}
+export interface AIComparisonRecord {
+  id: string
+  title: string
+  prompt: string
+  promptEdited: boolean
+  contexts: AskAIContextItem[]
+  linkTargets: AnnotationReference[]
+  providers: AIComparisonProviderResult[]
+  excerpts: AIComparisonExcerpt[]
+  createdAt: string
+  modifiedAt: string
+}
+export interface AIComparisonsDocument { schemaVersion: 1; comparisons: AIComparisonRecord[] }
+
 export interface ResearchWorkspace {
   schemaVersion: 1
   workspaceId?: string
@@ -206,6 +259,7 @@ export interface ResearchWorkspace {
   activeDocumentId: string | null
   tray: ResearchTrayItem[]
   question: string
+  comparisons?: AIComparisonRecord[]
 }
 
 export interface WorkspaceDocumentRecord {
@@ -285,6 +339,7 @@ export interface WorkspaceUiState {
   viewStates: Record<string, PdfViewState>
   tray: ResearchTrayItem[]
   question: string
+  comparisons?: AIComparisonRecord[]
 }
 
 export interface AnnotationFlushEntry { sessionId: string; document: AnnotationDocument }
@@ -310,6 +365,7 @@ interface AskAIBase {
   provider: AIProviderId
   mode: AskAIMode
   linkTargets: AnnotationReference[]
+  comparisonId?: string
 }
 
 export interface SelectionAskAIRequest extends AskAIBase {
@@ -327,13 +383,32 @@ export interface ResearchAskAIRequest extends AskAIBase {
   items: ResearchTrayItem[]
 }
 
-export type AskAIRequest = SelectionAskAIRequest | ResearchAskAIRequest
+export interface ComposedAskAIRequest extends AskAIBase {
+  kind: 'composed'
+  prompt: string
+  contexts: AskAIContextItem[]
+  promptEdited: boolean
+}
+
+export type AskAIRequest = SelectionAskAIRequest | ResearchAskAIRequest | ComposedAskAIRequest
+
+export interface AskAIComparisonRequest {
+  requestId: string
+  comparisonId: string
+  providers: AIProviderId[]
+  prompt: string
+  contexts: AskAIContextItem[]
+  promptEdited: boolean
+  linkTargets: AnnotationReference[]
+}
 
 export interface AskAIFailure { request: AskAIRequest; prompt: string; message: string }
 
 export interface AskAIStatus {
   requestId: string
-  state: 'inserted' | 'pending' | 'linked' | 'cancelled'
+  provider?: AIProviderId
+  comparisonId?: string
+  state: AskAIProviderDeliveryState
   linkTargets: AnnotationReference[]
   link?: AnnotationConversationLink
   message?: string
@@ -344,6 +419,7 @@ export type SelectionMenuRequest = Omit<SelectionAskAIRequest, 'requestId' | 'pr
   sourceFingerprint: string
   annotationId?: string
   reflow?: boolean
+  nearbyText?: string
 }
 
 export type BrowserCommand =
@@ -411,6 +487,7 @@ export interface KoibillApi {
   exportAnnotatedPdf(sessionId: string, document: AnnotationDocument): Promise<{ exported: boolean; pathLabel?: string }>
   showSelectionMenu(request: SelectionMenuRequest): void
   askAI(request: AskAIRequest): Promise<void>
+  compareAI(request: AskAIComparisonRequest): Promise<void>
   cancelAskAI(requestId: string): void
   retryAskAI(request: AskAIRequest): void
   copyText(text: string): Promise<void>
@@ -421,6 +498,9 @@ export interface KoibillApi {
   onBrowserState(callback: (state: BrowserState) => void): () => void
   onAskAIFailure(callback: (failure: AskAIFailure) => void): () => void
   onAskAIStatus(callback: (status: AskAIStatus) => void): () => void
+  onAskAICompose(callback: (seed: AskAIComposerSeed) => void): () => void
+  setActiveComparison(comparisonId: string | null, providers: AIProviderId[]): void
+  onComparisonExcerpt(callback: (comparisonId: string, excerpt: AIComparisonExcerpt) => void): () => void
   onResearchTrayItem(callback: (item: ResearchTrayItem) => void): () => void
   onGraphAppend(callback: (payload: GraphAppendPayload) => void): () => void
   onDownloadBlocked(callback: (url: string) => void): () => void

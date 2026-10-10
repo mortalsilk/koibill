@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { BrowserWindow, dialog, Menu, WebContentsView, session, shell } from 'electron'
-import type { AIProviderId, AnnotationConversationLink, AskAIFailure, AskAIRequest, AskAIStatus, BrowserBounds, BrowserCommand, BrowserState, BrowserTabState, GraphAppendPayload, WorkspaceBrowserState } from '../shared/types'
+import type { AIComparisonExcerpt, AIProviderId, AnnotationConversationLink, AskAIComparisonRequest, AskAIFailure, AskAIRequest, AskAIStatus, BrowserBounds, BrowserCommand, BrowserState, BrowserTabState, GraphAppendPayload, WorkspaceBrowserState } from '../shared/types'
 import { buildComposerScript, detectAIProvider, getAIProvider, isAIConversationUrl, isAIProviderUrl } from '../shared/ai-providers'
 import { isChatGptAuthCompletion, isSafeWebUrl, normalizeNavigation } from '../shared/validation'
 import { formatPrompt } from '../shared/prompt'
@@ -19,6 +19,7 @@ interface TabRecord {
   zoomFactor: number
   error?: string
   recoveryAttempts: number
+  recoveryTimer?: NodeJS.Timeout
   readyToPaint: boolean
   lastActivatedAt: number
 }
@@ -26,6 +27,7 @@ interface TabRecord {
 interface PendingLink {
   requestId: string
   provider: AIProviderId
+  comparisonId?: string
   linkTargets: AskAIRequest['linkTargets']
   timeout: NodeJS.Timeout
 }
@@ -47,6 +49,7 @@ export class BrowserTabs {
   private destroying = false
   private visible = true
   private attachedTabId: string | null = null
+  private activeComparison: { id: string; providers: AIProviderId[] } | null = null
 
   constructor(
     private readonly window: BrowserWindow,
@@ -113,11 +116,13 @@ export class BrowserTabs {
 
   async replaceWorkspaceState(state: WorkspaceBrowserState): Promise<void> {
     this.cancelAllPending('Workspace changed.')
+    this.activeComparison = null
     this.detachAttachedView()
     const previousTabs = this.tabs
     this.tabs = []
     this.activeTabId = null
     for (const tab of previousTabs) {
+      if (tab.recoveryTimer) clearTimeout(tab.recoveryTimer)
       const view = tab.view
       tab.view = undefined
       if (isLive(view)) view.webContents.close()
@@ -242,7 +247,7 @@ export class BrowserTabs {
         noLink: true,
       })
       if (result.response !== 0) {
-        this.onStatus({ requestId: request.requestId, state: 'cancelled', linkTargets: request.linkTargets, message: `${provider.name} request cancelled.` })
+        this.onStatus({ requestId: request.requestId, provider: request.provider, comparisonId: request.comparisonId, state: 'cancelled', linkTargets: request.linkTargets, message: `${provider.name} request cancelled.` })
         return
       }
       this.settings.update({ acknowledgedAIProviders: [...acknowledged, request.provider] })
@@ -260,6 +265,51 @@ export class BrowserTabs {
     this.queueDelivery(tab, request, prompt)
   }
 
+  async compareAI(request: AskAIComparisonRequest): Promise<void> {
+    this.onShowRequested()
+    if (request.prompt.length > 20_000) {
+      for (const provider of request.providers) this.onStatus({ requestId: `${request.requestId}:${provider}`, provider, comparisonId: request.comparisonId, state: 'failed', linkTargets: request.linkTargets, message: 'The comparison prompt exceeds 20,000 characters.' })
+      return
+    }
+    const acknowledged = Array.isArray(this.settings.snapshot.acknowledgedAIProviders) ? this.settings.snapshot.acknowledgedAIProviders : []
+    const newProviders = request.providers.filter((provider) => !acknowledged.includes(provider))
+    if (newProviders.length) {
+      const names = newProviders.map((provider) => getAIProvider(provider).name)
+      const result = await dialog.showMessageBox(this.window, {
+        type: 'info', title: 'Send context to AI providers?',
+        message: `koibill will submit this prompt to ${names.join(', ')}.`,
+        detail: 'Each passage will be handled under the selected provider accounts, privacy policies, and usage terms. koibill does not use API keys for this action.',
+        buttons: ['Continue', 'Cancel'], defaultId: 0, cancelId: 1, noLink: true,
+      })
+      if (result.response !== 0) {
+        for (const provider of request.providers) this.onStatus({ requestId: `${request.requestId}:${provider}`, provider, comparisonId: request.comparisonId, state: 'cancelled', linkTargets: request.linkTargets, message: 'Provider comparison cancelled.' })
+        return
+      }
+      this.settings.update({ acknowledgedAIProviders: [...new Set([...acknowledged, ...newProviders])] })
+    }
+    this.activeComparison = { id: request.comparisonId, providers: [...request.providers] }
+    const tabs: TabRecord[] = []
+    for (const providerId of request.providers) {
+      const provider = getAIProvider(providerId)
+      this.onStatus({ requestId: `${request.requestId}:${providerId}`, provider: providerId, comparisonId: request.comparisonId, state: 'loading', linkTargets: request.linkTargets, message: `Opening ${provider.name}.` })
+      let tab = this.tabs.filter((candidate) => isAIProviderUrl(liveUrl(candidate), providerId)).sort((a, b) => b.lastActivatedAt - a.lastActivatedAt)[0]
+      if (!tab) tab = await this.create(provider.homeUrl, false)
+      await this.ensureView(tab)
+      tabs.push(tab)
+      const delivery: AskAIRequest = {
+        kind: 'composed', requestId: `${request.requestId}:${providerId}`, provider: providerId, mode: 'send',
+        prompt: request.prompt, contexts: request.contexts, promptEdited: request.promptEdited,
+        linkTargets: request.linkTargets, comparisonId: request.comparisonId,
+      }
+      this.queueDelivery(tab, delivery, request.prompt)
+    }
+    if (tabs[0]) await this.activate(tabs[0].id)
+  }
+
+  setActiveComparison(id: string | null, providers: AIProviderId[]): void {
+    this.activeComparison = id ? { id, providers: [...providers] } : null
+  }
+
   cancelAskAI(requestId: string): void {
     for (const [tabId, pending] of this.pendingDeliveries) {
       if (pending.request.requestId === requestId) this.cancelPendingDelivery(tabId, 'Ask AI request cancelled.')
@@ -268,17 +318,19 @@ export class BrowserTabs {
       if (pending.requestId !== requestId) continue
       clearTimeout(pending.timeout)
       this.pendingLinks.delete(tabId)
-      this.onStatus({ requestId, state: 'cancelled', linkTargets: pending.linkTargets, message: 'Conversation linking cancelled.' })
+      this.onStatus({ requestId, provider: pending.provider, comparisonId: pending.comparisonId, state: 'cancelled', linkTargets: pending.linkTargets, message: 'Conversation linking cancelled.' })
     }
   }
 
   destroy(): void {
     this.destroying = true
+    this.activeComparison = null
     for (const pending of this.pendingLinks.values()) clearTimeout(pending.timeout)
     this.pendingLinks.clear()
     for (const pending of this.pendingDeliveries.values()) clearTimeout(pending.timeout)
     this.pendingDeliveries.clear()
     for (const tab of this.tabs) {
+      if (tab.recoveryTimer) clearTimeout(tab.recoveryTimer)
       if (!tab.view) continue
       if (this.isMounted(tab.view)) this.window.contentView.removeChildView(tab.view)
       tab.view.webContents.close()
@@ -290,7 +342,7 @@ export class BrowserTabs {
     for (const id of [...this.pendingDeliveries.keys()]) this.cancelPendingDelivery(id, message)
     for (const [tabId, pending] of this.pendingLinks) {
       clearTimeout(pending.timeout); this.pendingLinks.delete(tabId)
-      this.onStatus({ requestId: pending.requestId, state: 'cancelled', linkTargets: pending.linkTargets, message })
+      this.onStatus({ requestId: pending.requestId, provider: pending.provider, comparisonId: pending.comparisonId, state: 'cancelled', linkTargets: pending.linkTargets, message })
     }
   }
 
@@ -349,6 +401,7 @@ export class BrowserTabs {
     view.webContents.on('dom-ready', () => { tab.readyToPaint = true; renderInternalBlank(); refreshIfActive(); void this.attemptPendingDelivery(tab) })
     view.webContents.on('did-frame-finish-load', (_event, isMainFrame) => { if (isMainFrame) refreshIfActive() })
     view.webContents.on('did-finish-load', () => {
+      this.clearRecoveryTimer(tab)
       tab.error = undefined
       tab.recoveryAttempts = 0
       view.webContents.setZoomFactor(tab.zoomFactor)
@@ -363,16 +416,16 @@ export class BrowserTabs {
       tab.loading = false
       tab.error = `Page failed to load: ${errorDescription}`
       this.emit()
-      if (tab.recoveryAttempts < 1) setTimeout(() => this.recover(tab, false), 500)
+      if (tab.recoveryAttempts < 1) this.scheduleRecovery(tab, 500, false)
     })
     view.webContents.on('render-process-gone', (_event, details) => {
       tab.readyToPaint = false
       tab.error = `Browser renderer stopped (${details.reason}).`
       this.emit()
-      if (tab.recoveryAttempts < 2) setTimeout(() => this.recover(tab, false), 600)
+      if (tab.recoveryAttempts < 2) this.scheduleRecovery(tab, 600, true)
     })
-    view.webContents.on('unresponsive', () => { tab.error = 'This page is not responding.'; this.emit() })
-    view.webContents.on('responsive', () => { tab.error = undefined; this.emit(); refreshIfActive() })
+    view.webContents.on('unresponsive', () => { tab.error = 'This page is not responding.'; this.emit(); this.scheduleRecovery(tab, 4_000, true) })
+    view.webContents.on('responsive', () => { this.clearRecoveryTimer(tab); tab.error = undefined; this.emit(); refreshIfActive() })
     view.webContents.on('before-input-event', (event, input) => {
       if (!(input.control || input.meta) || input.type !== 'keyDown') return
       if (input.key === '+' || input.key === '=') { event.preventDefault(); this.setTabZoom(tab.id, tab.zoomFactor + 0.1) }
@@ -386,6 +439,13 @@ export class BrowserTabs {
       const url = view.webContents.getURL()
       const aiProvider = detectAIProvider(url)
       Menu.buildFromTemplate([
+        ...(aiProvider && this.activeComparison?.providers.includes(aiProvider.id) ? [{
+          label: 'Save selection to active comparison',
+          click: () => this.window.webContents.send('ask-ai:comparison-excerpt', this.activeComparison!.id, {
+            id: randomUUID(), provider: aiProvider.id, text: excerpt, title: tab.title,
+            url: isAIProviderUrl(url, aiProvider.id) ? url : undefined, browserTabId: tab.id, createdAt: new Date().toISOString(),
+          } satisfies AIComparisonExcerpt),
+        }] : []),
         {
           label: 'Append to graph',
           click: () => this.onAppendToGraph({
@@ -485,11 +545,12 @@ export class BrowserTabs {
     const index = this.tabs.findIndex((tab) => tab.id === id)
     if (index < 0) return
     const [removed] = this.tabs.splice(index, 1)
+    if (removed.recoveryTimer) clearTimeout(removed.recoveryTimer)
     const pending = this.pendingLinks.get(id)
     if (pending) {
       clearTimeout(pending.timeout)
       this.pendingLinks.delete(id)
-      this.onStatus({ requestId: pending.requestId, state: 'cancelled', linkTargets: pending.linkTargets, message: `The ${getAIProvider(pending.provider).name} tab was closed.` })
+      this.onStatus({ requestId: pending.requestId, provider: pending.provider, comparisonId: pending.comparisonId, state: 'cancelled', linkTargets: pending.linkTargets, message: `The ${getAIProvider(pending.provider).name} tab was closed.` })
     }
     this.cancelPendingDelivery(id, 'The AI tab was closed.')
     if (!this.tabs.length) this.tabs.push({ id: randomUUID(), url: CHATGPT_URL, title: 'ChatGPT', loading: false, zoomFactor: 1, recoveryAttempts: 0, readyToPaint: false, lastActivatedAt: 0 })
@@ -507,11 +568,12 @@ export class BrowserTabs {
     const index = this.tabs.findIndex((tab) => tab.id === id)
     if (index < 0) return
     const [removed] = this.tabs.splice(index, 1)
+    if (removed.recoveryTimer) clearTimeout(removed.recoveryTimer)
     const pending = this.pendingLinks.get(id)
     if (pending) {
       clearTimeout(pending.timeout)
       this.pendingLinks.delete(id)
-      this.onStatus({ requestId: pending.requestId, state: 'cancelled', linkTargets: pending.linkTargets, message: `The ${getAIProvider(pending.provider).name} tab was closed.` })
+      this.onStatus({ requestId: pending.requestId, provider: pending.provider, comparisonId: pending.comparisonId, state: 'cancelled', linkTargets: pending.linkTargets, message: `The ${getAIProvider(pending.provider).name} tab was closed.` })
     }
     this.cancelPendingDelivery(id, 'The AI tab was closed.')
     if (removed.view) {
@@ -630,6 +692,28 @@ export class BrowserTabs {
     tab.view.webContents.reloadIgnoringCache()
   }
 
+  private scheduleRecovery(tab: TabRecord, delay: number, recreateView: boolean): void {
+    if (this.destroying || tab.recoveryTimer) return
+    tab.recoveryTimer = setTimeout(() => {
+      tab.recoveryTimer = undefined
+      if (this.destroying || !this.tabs.includes(tab) || tab.recoveryAttempts >= 2) return
+      if (recreateView && isLive(tab.view)) {
+        const staleView = tab.view
+        if (this.attachedTabId === tab.id) this.detachAttachedView()
+        if (this.isMounted(staleView)) this.window.contentView.removeChildView(staleView)
+        tab.view = undefined
+        staleView.webContents.close()
+      }
+      this.recover(tab, false)
+    }, delay)
+  }
+
+  private clearRecoveryTimer(tab: TabRecord): void {
+    if (!tab.recoveryTimer) return
+    clearTimeout(tab.recoveryTimer)
+    tab.recoveryTimer = undefined
+  }
+
   private failAsk(request: AskAIRequest, prompt: string): void {
     const provider = getAIProvider(request.provider)
     this.onFailure({
@@ -637,16 +721,20 @@ export class BrowserTabs {
       prompt,
       message: `${provider.name} is not ready for text insertion. Sign in if needed, then retry or copy the prompt.`,
     })
+    this.onStatus({ requestId: request.requestId, provider: request.provider, comparisonId: request.comparisonId, state: 'failed', linkTargets: request.linkTargets, message: `${provider.name} insertion failed.` })
   }
 
   private queueDelivery(tab: TabRecord, request: AskAIRequest, prompt: string): void {
     this.cancelPendingDelivery(tab.id, 'Superseded by a newer Ask AI request.')
+    if (isLive(tab.view)) tab.view.webContents.setBackgroundThrottling(false)
+    if (request.comparisonId) this.onStatus({ requestId: request.requestId, provider: request.provider, comparisonId: request.comparisonId, state: 'queued', linkTargets: request.linkTargets, message: `Queued for ${getAIProvider(request.provider).name}.` })
     const timeout = setTimeout(() => {
       const pending = this.pendingDeliveries.get(tab.id)
       if (!pending || pending.request.requestId !== request.requestId) return
       this.pendingDeliveries.delete(tab.id)
+      if (isLive(tab.view)) tab.view.webContents.setBackgroundThrottling(true)
       if (!pending.failureShown) this.failAsk(request, prompt)
-      this.onStatus({ requestId: request.requestId, state: 'cancelled', linkTargets: request.linkTargets, message: `${getAIProvider(request.provider).name} insertion expired.` })
+      this.onStatus({ requestId: request.requestId, provider: request.provider, comparisonId: request.comparisonId, state: 'expired', linkTargets: request.linkTargets, message: `${getAIProvider(request.provider).name} insertion expired.` })
     }, 30 * 60 * 1_000)
     this.pendingDeliveries.set(tab.id, { request, prompt, timeout, attempting: false, failureShown: false })
     void this.attemptPendingDelivery(tab)
@@ -676,10 +764,12 @@ export class BrowserTabs {
     if (inserted) {
       clearTimeout(pending.timeout)
       this.pendingDeliveries.delete(tab.id)
-      this.onStatus({ requestId: pending.request.requestId, state: 'inserted', linkTargets: pending.request.linkTargets, message: `Prompt inserted into ${currentProvider.name}.` })
+      if (isLive(tab.view)) tab.view.webContents.setBackgroundThrottling(true)
+      this.onStatus({ requestId: pending.request.requestId, provider: pending.request.provider, comparisonId: pending.request.comparisonId, state: 'inserted', linkTargets: pending.request.linkTargets, message: `Prompt inserted into ${currentProvider.name}.` })
       this.registerPendingLink(tab, pending.request)
     } else if (!pending.failureShown) {
       pending.failureShown = true
+      if (isLive(tab.view)) tab.view.webContents.setBackgroundThrottling(true)
       this.failAsk(pending.request, pending.prompt)
     }
   }
@@ -694,11 +784,13 @@ export class BrowserTabs {
     }
     if (provider) {
       pending.failureShown = false
+      if (isLive(tab.view)) tab.view.webContents.setBackgroundThrottling(false)
       void this.attemptPendingDelivery(tab)
     } else if (!pending.failureShown) {
       // OAuth and account pages commonly live on a different host. Keep the
       // request alive while making the manual fallback available.
       pending.failureShown = true
+      if (isLive(tab.view)) tab.view.webContents.setBackgroundThrottling(true)
       this.failAsk(pending.request, pending.prompt)
     }
   }
@@ -708,29 +800,31 @@ export class BrowserTabs {
     if (!pending) return
     clearTimeout(pending.timeout)
     this.pendingDeliveries.delete(tabId)
-    this.onStatus({ requestId: pending.request.requestId, state: 'cancelled', linkTargets: pending.request.linkTargets, message })
+    const tab = this.tabs.find((candidate) => candidate.id === tabId)
+    if (isLive(tab?.view)) tab.view.webContents.setBackgroundThrottling(true)
+    this.onStatus({ requestId: pending.request.requestId, provider: pending.request.provider, comparisonId: pending.request.comparisonId, state: 'cancelled', linkTargets: pending.request.linkTargets, message })
   }
 
   private registerPendingLink(tab: TabRecord, request: AskAIRequest): void {
-    if (!request.linkTargets.length) return
+    if (!request.linkTargets.length && !request.comparisonId) return
     const url = liveUrl(tab)
     if (isAIConversationUrl(url, request.provider)) {
-      this.emitLinked(request.requestId, request.linkTargets, tab, url)
+      this.emitLinked(request.requestId, request.linkTargets, tab, url, request.comparisonId)
       return
     }
     const previous = this.pendingLinks.get(tab.id)
     if (previous) {
       clearTimeout(previous.timeout)
-      this.onStatus({ requestId: previous.requestId, state: 'cancelled', linkTargets: previous.linkTargets, message: 'Superseded by a newer Ask AI request.' })
+      this.onStatus({ requestId: previous.requestId, provider: previous.provider, comparisonId: previous.comparisonId, state: 'cancelled', linkTargets: previous.linkTargets, message: 'Superseded by a newer Ask AI request.' })
     }
     const timeout = setTimeout(() => {
       const pending = this.pendingLinks.get(tab.id)
       if (!pending || pending.requestId !== request.requestId) return
       this.pendingLinks.delete(tab.id)
-      this.onStatus({ requestId: request.requestId, state: 'cancelled', linkTargets: request.linkTargets, message: 'Conversation link expired.' })
+      this.onStatus({ requestId: request.requestId, provider: request.provider, comparisonId: request.comparisonId, state: 'expired', linkTargets: request.linkTargets, message: 'Conversation link expired.' })
     }, 30 * 60 * 1_000)
-    this.pendingLinks.set(tab.id, { requestId: request.requestId, provider: request.provider, linkTargets: request.linkTargets, timeout })
-    this.onStatus({ requestId: request.requestId, state: 'pending', linkTargets: request.linkTargets, message: `Waiting for the ${getAIProvider(request.provider).name} conversation to be created.` })
+    this.pendingLinks.set(tab.id, { requestId: request.requestId, provider: request.provider, comparisonId: request.comparisonId, linkTargets: request.linkTargets, timeout })
+    this.onStatus({ requestId: request.requestId, provider: request.provider, comparisonId: request.comparisonId, state: 'pending', linkTargets: request.linkTargets, message: `Waiting for the ${getAIProvider(request.provider).name} conversation to be created.` })
   }
 
   private resolvePendingLink(tab: TabRecord, url: string): void {
@@ -739,17 +833,17 @@ export class BrowserTabs {
     if (isAIConversationUrl(url, pending.provider)) {
       clearTimeout(pending.timeout)
       this.pendingLinks.delete(tab.id)
-      this.emitLinked(pending.requestId, pending.linkTargets, tab, url)
+      this.emitLinked(pending.requestId, pending.linkTargets, tab, url, pending.comparisonId)
       return
     }
     if (!isAIProviderUrl(url, pending.provider)) {
       clearTimeout(pending.timeout)
       this.pendingLinks.delete(tab.id)
-      this.onStatus({ requestId: pending.requestId, state: 'cancelled', linkTargets: pending.linkTargets, message: `Leaving ${getAIProvider(pending.provider).name} cancelled conversation linking.` })
+      this.onStatus({ requestId: pending.requestId, provider: pending.provider, comparisonId: pending.comparisonId, state: 'cancelled', linkTargets: pending.linkTargets, message: `Leaving ${getAIProvider(pending.provider).name} cancelled conversation linking.` })
     }
   }
 
-  private emitLinked(requestId: string, linkTargets: AskAIRequest['linkTargets'], tab: TabRecord, url: string): void {
+  private emitLinked(requestId: string, linkTargets: AskAIRequest['linkTargets'], tab: TabRecord, url: string, comparisonId?: string): void {
     const link: AnnotationConversationLink = {
       id: randomUUID(),
       provider: detectAIProvider(url)?.id ?? 'chatgpt',
@@ -758,7 +852,7 @@ export class BrowserTabs {
       browserTabId: tab.id,
       createdAt: new Date().toISOString(),
     }
-    this.onStatus({ requestId, state: 'linked', linkTargets, link })
+    this.onStatus({ requestId, provider: link.provider, comparisonId, state: 'linked', linkTargets, link })
   }
 }
 

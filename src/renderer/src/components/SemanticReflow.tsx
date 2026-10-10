@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 import { AlertTriangle, ExternalLink } from 'lucide-react'
 import type { PDFDocumentProxy, PDFPageProxy } from 'pdfjs-dist'
+import { isPdfRenderCancellation, observePdfRender } from '../pdf-render-lifecycle'
 import type { ReflowTypographySettings, SemanticBlock, SemanticDocument, SemanticSourceSpan } from '../../../shared/types'
 import { createSemanticDocument, extractSemanticPage, removeRecurringPageFurniture, replaceSemanticPage, semanticCacheMatches, type SemanticTextItem } from '../semantic-reflow'
 
@@ -171,13 +172,16 @@ export function SemanticReflow(props: SemanticReflowProps): React.JSX.Element {
       return node ? range.intersectsNode(node) : false
     })
     const spans = selected.flatMap((block) => block.sourceSpans)
+    const firstIndex = selected.length ? semantic.blocks.findIndex((block) => block.id === selected[0].id) : -1
+    const lastIndex = selected.length ? semantic.blocks.findIndex((block) => block.id === selected[selected.length - 1].id) : firstIndex
+    const nearbyText = firstIndex >= 0 ? semantic.blocks.slice(Math.max(0, firstIndex - 1), Math.min(semantic.blocks.length, lastIndex + 2)).map((block) => block.text).filter(Boolean).join('\n\n').slice(0, 4_000) : undefined
     if (!spans.length) return
     event.preventDefault()
     const pages = spans.map((span) => span.pageNumber)
     window.koibill.showSelectionMenu({
       kind: 'selection', text, documentId: props.documentId, sourceFingerprint: props.fingerprint,
       documentName: props.documentName, pageNumber: Math.min(...pages), endPageNumber: Math.max(...pages), sourceSpans: spans,
-      reflow: true,
+      reflow: true, nearbyText,
     })
   }
 
@@ -223,13 +227,14 @@ function AssetCrop({ asset, getPage }: { asset: NonNullable<SemanticBlock['asset
       source.width = Math.ceil(viewport.width); source.height = Math.ceil(viewport.height)
       const context = source.getContext('2d'); if (!context) return
       task = page.render({ canvas: source, canvasContext: context, viewport })
-      await task.promise
+      const rendered = await observePdfRender(task.promise, () => cancelled, (error) => console.warn('Unable to render semantic asset', error))
+      if (!rendered) return
       const target = canvasRef.current; if (!target || cancelled) return
       const sx = asset.rect.x * source.width; const sy = asset.rect.y * source.height
       const sw = Math.max(1, asset.rect.width * source.width); const sh = Math.max(1, asset.rect.height * source.height)
       target.width = Math.min(1200, Math.ceil(sw)); target.height = Math.min(800, Math.ceil(sh))
       target.getContext('2d')?.drawImage(source, sx, sy, sw, sh, 0, 0, target.width, target.height)
-    }).catch(() => undefined)
+    }).catch((error) => { if (!cancelled && !isPdfRenderCancellation(error)) console.warn('Unable to render semantic asset', error) })
     return () => { cancelled = true; task?.cancel() }
   }, [asset, getPage])
   return <canvas ref={canvasRef} className="semantic-asset" aria-label={`${asset.kind} from page ${asset.pageNumber}`}/>

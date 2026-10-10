@@ -26,4 +26,29 @@ describe('native browser view lifecycle', () => {
     expect(source).toContain("kind: aiProvider ? 'ai' : 'web'")
     expect(source).toContain('provider: aiProvider?.id')
   })
+
+  it('captures selected provider answers only for the active comparison', () => {
+    const source = readFileSync(new URL('./browser-tabs.ts', import.meta.url), 'utf8')
+    expect(source).toContain("label: 'Save selection to active comparison'")
+    expect(source).toContain("this.activeComparison?.providers.includes(aiProvider.id)")
+    expect(source).toContain("'ask-ai:comparison-excerpt'")
+    expect(source).toContain('if (!request.linkTargets.length && !request.comparisonId) return')
+  })
+
+  it('keeps background comparison deliveries responsive, then restores throttling', () => {
+    const source = readFileSync(new URL('./browser-tabs.ts', import.meta.url), 'utf8')
+    const delivery = source.slice(source.indexOf('private queueDelivery'), source.indexOf('private registerPendingLink'))
+    expect(delivery).toContain('setBackgroundThrottling(false)')
+    expect(delivery).toContain('setBackgroundThrottling(true)')
+  })
+
+  it('bounds automatic recovery and replaces crashed browser surfaces', () => {
+    const source = readFileSync(new URL('./browser-tabs.ts', import.meta.url), 'utf8')
+    const configure = source.slice(source.indexOf('private configureView'), source.indexOf('private attachView'))
+    const recovery = source.slice(source.indexOf('private scheduleRecovery'), source.indexOf('private failAsk'))
+    expect(configure).toContain("on('render-process-gone'")
+    expect(configure).toContain('this.scheduleRecovery(tab, 600, true)')
+    expect(recovery).toContain('tab.recoveryAttempts >= 2')
+    expect(recovery).toContain('tab.view = undefined')
+  })
 })

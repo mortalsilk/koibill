@@ -1,13 +1,14 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react'
 import { PanelRightClose, PanelRightOpen } from 'lucide-react'
 import { BrowserPane } from './components/BrowserPane'
-import { NotesPane } from './components/NotesPane'
-import { GraphPane } from './components/GraphPane'
 import { PdfWorkspace } from './components/PdfWorkspace'
 import { WorkspaceChooser, WorkspaceMenu } from './components/WorkspaceMenu'
 import type { ReflowTypographySettings, ResearchWorkspace, RightPaneMode, UiState, WorkspaceLibrarySettings } from '../../shared/types'
 import { useWorkspaceStore } from './store'
 import { flushWorkspaceEditors, registerWorkspaceFlusher } from './persistence'
+
+const NotesPane = lazy(() => import('./components/NotesPane').then((module) => ({ default: module.NotesPane })))
+const GraphPane = lazy(() => import('./components/GraphPane').then((module) => ({ default: module.GraphPane })))
 
 export function App(): React.JSX.Element {
   const shellRef = useRef<HTMLDivElement>(null)
@@ -15,6 +16,7 @@ export function App(): React.JSX.Element {
   const [dragging, setDragging] = useState(false)
   const [ready, setReady] = useState(false)
   const [rightPaneMode, setRightPaneMode] = useState<RightPaneMode>('browser')
+  const [loadedSurfaces, setLoadedSurfaces] = useState({ notes: false, graph: false })
   const [rightPaneCollapsed, setRightPaneCollapsed] = useState(false)
   const [browserRevealReady, setBrowserRevealReady] = useState(false)
   const [appOverlayOpen, setAppOverlayOpen] = useState(false)
@@ -58,6 +60,12 @@ export function App(): React.JSX.Element {
   }, [ready, rightPaneMode])
 
   useEffect(() => {
+    if (rightPaneMode === 'notes' || rightPaneMode === 'graph') {
+      setLoadedSurfaces((current) => current[rightPaneMode] ? current : { ...current, [rightPaneMode]: true })
+    }
+  }, [rightPaneMode])
+
+  useEffect(() => {
     if (!ready) return
     const timeout = window.setTimeout(() => void window.koibill.saveUiState({ rightPaneCollapsed }), 150)
     return () => window.clearTimeout(timeout)
@@ -76,7 +84,7 @@ export function App(): React.JSX.Element {
   }, [rightPaneCollapsed])
 
   useEffect(() => {
-    const update = (): void => setAppOverlayOpen(Boolean(document.querySelector('.modal-backdrop, .import-overlay')))
+    const update = (): void => setAppOverlayOpen(Boolean(document.querySelector('.modal-backdrop, .import-overlay, .ui-popover, .workspace-menu')))
     const observer = new MutationObserver(update)
     observer.observe(document.body, { childList: true, subtree: true })
     update()
@@ -113,7 +121,7 @@ export function App(): React.JSX.Element {
           const document = current.documents[id]
           return document ? [[id, { zoom: document.zoom, rotation: document.rotation, currentPage: document.currentPage, focus: document.focus, reflow: document.reflow }]] : []
         }))
-        await window.koibill.completeWorkspaceFlush([], { documentIds: current.order, activeDocumentId: current.activeDocumentId, viewStates, tray: current.tray, question: current.question })
+        await window.koibill.completeWorkspaceFlush([], { documentIds: current.order, activeDocumentId: current.activeDocumentId, viewStates, tray: current.tray, question: current.question, comparisons: current.comparisons })
       } catch (error) { window.alert(`Unable to close safely: ${String(error)}`) }
     })()
   }), [splitRatio, rightPaneMode, rightPaneCollapsed])
@@ -143,16 +151,16 @@ export function App(): React.JSX.Element {
           <BrowserPane active={!rightPaneCollapsed && browserRevealReady && !appOverlayOpen && rightPaneMode === 'browser'} layoutKey={Math.round(splitRatio * 10_000) + (rightPaneCollapsed ? 1 : 0) + (appOverlayOpen ? 2 : 0)} />
         </div>
         <div className={`right-surface ${rightPaneMode === 'notes' ? 'visible' : 'hidden'}`} aria-hidden={rightPaneMode !== 'notes'}>
-          <NotesPane
+          {loadedSurfaces.notes ? <Suspense fallback={<SurfaceLoading label="Loading notes…"/>}><NotesPane
             active={rightPaneMode === 'notes'}
             sessionId={activeDocument?.session?.id}
             documentName={activeDocument?.descriptor.name}
             pageNumber={activeDocument?.currentPage ?? 1}
             onOpenBrowser={() => showRightPane('browser')}
-          />
+          /></Suspense> : null}
         </div>
         <div className={`right-surface ${rightPaneMode === 'graph' ? 'visible' : 'hidden'}`} aria-hidden={rightPaneMode !== 'graph'}>
-          <GraphPane
+          {loadedSurfaces.graph ? <Suspense fallback={<SurfaceLoading label="Loading graph…"/>}><GraphPane
             active={rightPaneMode === 'graph'}
             sessionId={activeDocument?.session?.id}
             documentId={activeDocument?.session?.documentId}
@@ -167,12 +175,16 @@ export function App(): React.JSX.Element {
               setCurrentPage(documentId, page)
               requestAnimationFrame(() => document.getElementById(`pdf-page-${page}`)?.scrollIntoView({ block: 'start', behavior: 'smooth' }))
             }}
-          />
+          /></Suspense> : null}
         </div>
       </section>
     </main>}
     </div>
   )
+}
+
+function SurfaceLoading({ label }: { label: string }): React.JSX.Element {
+  return <div className="surface-loading" role="status">{label}</div>
 }
 
 function isEditableTarget(target: EventTarget | null): boolean {

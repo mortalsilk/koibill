@@ -15,7 +15,11 @@ export function BrowserPane({ layoutKey, active: paneActive }: { layoutKey: numb
   useEffect(() => {
     void window.koibill.getBrowserState().then(setState)
     const offState = window.koibill.onBrowserState(setState)
-    const offFailure = window.koibill.onAskAIFailure(setFailure)
+    const offFailure = window.koibill.onAskAIFailure((next) => {
+      // Comparison failures are tracked per provider in Research, where one
+      // provider cannot overwrite another provider's recovery controls.
+      if (!next.request.comparisonId) setFailure(next)
+    })
     const offAskStatus = window.koibill.onAskAIStatus((status) => {
       if (status.state === 'inserted' || status.state === 'linked') setFailure((current) => current?.request.requestId === status.requestId ? null : current)
     })

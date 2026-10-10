@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron'
-import type { AnnotationFlushEntry, AskAIFailure, AskAIRequest, AskAIStatus, BrowserBounds, BrowserCommand, BrowserState, GraphAppendPayload, KoibillApi, PdfImportProgress, ResearchTrayItem, SemanticDocument } from '../shared/types'
+import type { AIComparisonExcerpt, AIProviderId, AnnotationFlushEntry, AskAIComposerSeed, AskAIFailure, AskAIRequest, AskAIStatus, BrowserBounds, BrowserCommand, BrowserState, GraphAppendPayload, KoibillApi, PdfImportProgress, ResearchTrayItem, SemanticDocument } from '../shared/types'
 
 const api: KoibillApi = {
   openPdf: () => ipcRenderer.invoke('pdf:open'),
@@ -45,6 +45,7 @@ const api: KoibillApi = {
   exportAnnotatedPdf: (sessionId, document) => ipcRenderer.invoke('pdf:export', sessionId, document),
   showSelectionMenu: (request) => ipcRenderer.send('pdf:selection-menu', request),
   askAI: (request) => ipcRenderer.invoke('ask-ai:run', request),
+  compareAI: (request) => ipcRenderer.invoke('ask-ai:compare', request),
   cancelAskAI: (requestId) => ipcRenderer.send('ask-ai:cancel', requestId),
   retryAskAI: (request: AskAIRequest) => ipcRenderer.send('ask-ai:retry', request),
   copyText: (text: string) => ipcRenderer.invoke('clipboard:write', text),
@@ -66,6 +67,17 @@ const api: KoibillApi = {
     const listener = (_event: Electron.IpcRendererEvent, status: AskAIStatus): void => callback(status)
     ipcRenderer.on('ask-ai:status', listener)
     return () => ipcRenderer.removeListener('ask-ai:status', listener)
+  },
+  onAskAICompose: (callback: (seed: AskAIComposerSeed) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, seed: AskAIComposerSeed): void => callback(seed)
+    ipcRenderer.on('ask-ai:compose', listener)
+    return () => ipcRenderer.removeListener('ask-ai:compose', listener)
+  },
+  setActiveComparison: (comparisonId: string | null, providers: AIProviderId[]) => ipcRenderer.send('ask-ai:active-comparison', comparisonId, providers),
+  onComparisonExcerpt: (callback: (comparisonId: string, excerpt: AIComparisonExcerpt) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, comparisonId: string, excerpt: AIComparisonExcerpt): void => callback(comparisonId, excerpt)
+    ipcRenderer.on('ask-ai:comparison-excerpt', listener)
+    return () => ipcRenderer.removeListener('ask-ai:comparison-excerpt', listener)
   },
   onResearchTrayItem: (callback: (item: ResearchTrayItem) => void) => {
     const listener = (_event: Electron.IpcRendererEvent, item: ResearchTrayItem): void => callback(item)
